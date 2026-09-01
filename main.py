@@ -3,7 +3,7 @@ import os
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, MessageReactionUpdated, ReactionTypeEmoji
 from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -53,7 +53,7 @@ async def start_handler(message: Message):
         "👤 Анонимный чат\n\n"
         "Отправь мне сообщение или фото в личку, "
         "и я опубликую его в группе анонимно.\n\n"
-        "Если на твой пост ответят в группе, бот пришлёт этот ответ тебе сюда!"
+        "Если на твой пост ответят или поставят реакцию в группе, бот пришлёт уведомление тебе сюда!"
     )
 
 # -----------------------
@@ -92,6 +92,12 @@ async def anonymous_message(message: Message):
             (sent_message.message_id, anonymous_id)
         )
         await db.commit()
+
+    # Реакция от бота при получении сообщения
+    try:
+        await message.react([ReactionTypeEmoji(emoji="👍")])
+    except Exception:
+        pass
 
     await message.answer(
         f"✅ Сообщение отправлено анонимно.\n"
@@ -137,10 +143,55 @@ async def anonymous_photo(message: Message):
         )
         await db.commit()
 
+    # Реакция от бота при получении фото
+    try:
+        await message.react([ReactionTypeEmoji(emoji="👍")])
+    except Exception:
+        pass
+
     await message.answer(
         f"✅ Фотография отправлена анонимно.\n"
         f"Номер: #{anonymous_id}"
     )
+
+# -----------------------
+# Обработка реакций из группы (Группа -> ЛС автору)
+# -----------------------
+
+@dp.message_reaction(F.chat.id == ANON_CHAT_ID)
+async def reaction_handler(reaction: MessageReactionUpdated):
+    # Если реакцию сняли, ничего не делаем
+    if not reaction.new_reaction:
+        return
+
+    msg_id = reaction.message_id
+
+    async with aiosqlite.connect("anonymous.db") as db:
+        async with db.execute(
+            """
+            SELECT id, user_id FROM anonymous_messages
+            WHERE telegram_message_id = ?
+            """,
+            (msg_id,)
+        ) as cursor:
+            result = await cursor.fetchone()
+
+    if not result:
+        return
+
+    anonymous_id, target_user_id = result
+    last_reaction = reaction.new_reaction[-1]
+
+    # Если реакция стандартная (эмодзи)
+    if hasattr(last_reaction, "emoji"):
+        emoji = last_reaction.emoji
+        try:
+            await bot.send_message(
+                chat_id=target_user_id,
+                text=f"{emoji} На твой анонимный пост #{anonymous_id} поставили реакцию!"
+            )
+        except TelegramAPIError:
+            pass
 
 # -----------------------
 # Обработка ответов в группе (Группа -> ЛС автору)
@@ -171,7 +222,6 @@ async def group_reply_handler(message: Message):
     try:
         header = f"💬 <b>Ответ на твой анонимный пост #{anonymous_id}:</b>"
 
-        # 1. Если ответили фотографией
         if message.photo:
             caption_text = f"{header}\n\n{message.caption}" if message.caption else header
             await bot.send_photo(
@@ -180,16 +230,12 @@ async def group_reply_handler(message: Message):
                 caption=caption_text,
                 parse_mode="HTML"
             )
-
-        # 2. Если ответили обычным текстом
         elif message.text:
             await bot.send_message(
                 chat_id=target_user_id,
                 text=f"{header}\n\n{message.text}",
                 parse_mode="HTML"
             )
-
-        # 3. Для остальных типов медиа (стикеры, видео, голосовые)
         else:
             await bot.send_message(
                 chat_id=target_user_id,

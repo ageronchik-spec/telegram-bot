@@ -59,8 +59,63 @@ async def start_handler(message: Message):
         "👤 Анонимный чат\n\n"
         "Отправь мне сообщение или фото в личку, "
         "и я опубликую его в группе анонимно.\n\n"
-        "Если на твой пост ответят или поставят реакцию в группе, бот перешлёт всё сюда!"
+        "Если на твой пост ответят или поставят реакцию в группе, бот перешлёт всё сюда!\n"
+        "Ты также можешь ответить (Reply) на любое своё сообщение здесь, чтобы отправить ответ в группу."
     )
+
+# -----------------------
+# Ответ пользователя на свое сообщение в ЛС (ЛС Reply -> Группа Reply)
+# -----------------------
+
+@dp.message(F.chat.type == "private", F.reply_to_message)
+async def user_reply_in_pm(message: Message):
+    if message.text and message.text.startswith("/"):
+        return
+
+    replied_user_msg_id = message.reply_to_message.message_id
+
+    # Ищем пост в базе по ID сообщения пользователя в ЛС
+    async with aiosqlite.connect("anonymous.db") as db:
+        async with db.execute(
+            """
+            SELECT id, telegram_message_id FROM anonymous_messages
+            WHERE user_message_id = ?
+            """,
+            (replied_user_msg_id,)
+        ) as cursor:
+            result = await cursor.fetchone()
+
+    if not result:
+        # Если ответили просто на обычное сообщение не из базы, обрабатываем как новое анонимное сообщение
+        await anonymous_message(message)
+        return
+
+    anonymous_id, group_msg_id = result
+
+    try:
+        if message.photo:
+            caption_text = f"🥷 Аноним #{anonymous_id}"
+            if message.caption:
+                caption_text += f"\n\n{message.caption}"
+            await bot.send_photo(
+                chat_id=ANON_CHAT_ID,
+                photo=message.photo[-1].file_id,
+                caption=caption_text,
+                reply_to_message_id=group_msg_id
+            )
+        elif message.text:
+            await bot.send_message(
+                chat_id=ANON_CHAT_ID,
+                text=f"🥷 Аноним #{anonymous_id}\n\n{message.text}",
+                reply_to_message_id=group_msg_id
+            )
+        else:
+            await message.copy_message(
+                chat_id=ANON_CHAT_ID,
+                reply_to_message_id=group_msg_id
+            )
+    except TelegramAPIError:
+        pass
 
 # -----------------------
 # Анонимные текстовые сообщения (ЛС -> Группа)
@@ -213,7 +268,6 @@ async def group_reply_handler(message: Message):
     anonymous_id, target_user_id, user_msg_id = result
 
     try:
-        # Указываем reply_to_message_id, чтобы бота ответил конкретно на сообщение пользователя в ЛС
         if message.photo:
             caption_text = message.caption if message.caption else None
             await bot.send_photo(

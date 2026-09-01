@@ -1,34 +1,32 @@
 import asyncio
-import sqlite3
 import os
+import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ANON_CHAT_ID = -1003896678128
+
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 # -----------------------
-# База данных
+# Инициализация базы данных
 # -----------------------
 
-db = sqlite3.connect("anonymous.db")
-cursor = db.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS anonymous_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    username TEXT,
-    first_name TEXT,
-    telegram_message_id INTEGER
-)
-""")
-
-db.commit()
+async def init_db():
+    async with aiosqlite.connect("anonymous.db") as db:
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS anonymous_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            telegram_message_id INTEGER
+        )
+        """)
+        await db.commit()
 
 # -----------------------
 # Проверка администратора
@@ -45,7 +43,7 @@ async def is_admin(user_id: int) -> bool:
         return False
 
 # -----------------------
-# /start
+# Команда /start
 # -----------------------
 
 @dp.message(CommandStart())
@@ -68,35 +66,31 @@ async def anonymous_message(message: Message):
 
     user = message.from_user
 
-    cursor.execute(
-        """
-        INSERT INTO anonymous_messages
-        (user_id, username, first_name)
-        VALUES (?, ?, ?)
-        """,
-        (user.id, user.username, user.first_name)
-    )
-    db.commit()
-
-    anonymous_id = cursor.lastrowid
-
-    sent_message = await bot.send_message(
-        chat_id=ANON_CHAT_ID,
-        text=(
-            f"🥷 Аноним #{anonymous_id}\n\n"
-            f"{message.text}"
+    async with aiosqlite.connect("anonymous.db") as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO anonymous_messages (user_id, username, first_name)
+            VALUES (?, ?, ?)
+            """,
+            (user.id, user.username, user.first_name)
         )
-    )
+        await db.commit()
+        anonymous_id = cursor.lastrowid
 
-    cursor.execute(
-        """
-        UPDATE anonymous_messages
-        SET telegram_message_id = ?
-        WHERE id = ?
-        """,
-        (sent_message.message_id, anonymous_id)
-    )
-    db.commit()
+        sent_message = await bot.send_message(
+            chat_id=ANON_CHAT_ID,
+            text=f"🥷 Аноним #{anonymous_id}\n\n{message.text}"
+        )
+
+        await db.execute(
+            """
+            UPDATE anonymous_messages
+            SET telegram_message_id = ?
+            WHERE id = ?
+            """,
+            (sent_message.message_id, anonymous_id)
+        )
+        await db.commit()
 
     await message.answer(
         f"✅ Сообщение отправлено анонимно.\n"
@@ -111,37 +105,36 @@ async def anonymous_message(message: Message):
 async def anonymous_photo(message: Message):
     user = message.from_user
 
-    cursor.execute(
-        """
-        INSERT INTO anonymous_messages
-        (user_id, username, first_name)
-        VALUES (?, ?, ?)
-        """,
-        (user.id, user.username, user.first_name)
-    )
-    db.commit()
+    async with aiosqlite.connect("anonymous.db") as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO anonymous_messages (user_id, username, first_name)
+            VALUES (?, ?, ?)
+            """,
+            (user.id, user.username, user.first_name)
+        )
+        await db.commit()
+        anonymous_id = cursor.lastrowid
 
-    anonymous_id = cursor.lastrowid
+        caption_text = f"🥷 Аноним #{anonymous_id}"
+        if message.caption:
+            caption_text += f"\n\n{message.caption}"
 
-    caption_text = f"🥷 Аноним #{anonymous_id}"
-    if message.caption:
-        caption_text += f"\n\n{message.caption}"
+        sent_message = await bot.send_photo(
+            chat_id=ANON_CHAT_ID,
+            photo=message.photo[-1].file_id,
+            caption=caption_text
+        )
 
-    sent_message = await bot.send_photo(
-        chat_id=ANON_CHAT_ID,
-        photo=message.photo[-1].file_id,
-        caption=caption_text
-    )
-
-    cursor.execute(
-        """
-        UPDATE anonymous_messages
-        SET telegram_message_id = ?
-        WHERE id = ?
-        """,
-        (sent_message.message_id, anonymous_id)
-    )
-    db.commit()
+        await db.execute(
+            """
+            UPDATE anonymous_messages
+            SET telegram_message_id = ?
+            WHERE id = ?
+            """,
+            (sent_message.message_id, anonymous_id)
+        )
+        await db.commit()
 
     await message.answer(
         f"✅ Фотография отправлена анонимно.\n"
@@ -149,7 +142,7 @@ async def anonymous_photo(message: Message):
     )
 
 # -----------------------
-# /who
+# Команда /who
 # -----------------------
 
 @dp.message(Command("who"))
@@ -172,16 +165,16 @@ async def who_handler(message: Message):
         await message.reply("❌ Неверный номер.")
         return
 
-    cursor.execute(
-        """
-        SELECT user_id, username, first_name
-        FROM anonymous_messages
-        WHERE id = ?
-        """,
-        (anonymous_id,)
-    )
-
-    result = cursor.fetchone()
+    async with aiosqlite.connect("anonymous.db") as db:
+        async with db.execute(
+            """
+            SELECT user_id, username, first_name
+            FROM anonymous_messages
+            WHERE id = ?
+            """,
+            (anonymous_id,)
+        ) as cursor:
+            result = await cursor.fetchone()
 
     if not result:
         await message.reply("❌ Сообщение с таким номером не найдено.")
@@ -200,10 +193,11 @@ async def who_handler(message: Message):
     )
 
 # -----------------------
-# Запуск
+# Точка входа
 # -----------------------
 
 async def main():
+    await init_db()
     print("Bot started")
     await dp.start_polling(bot)
 

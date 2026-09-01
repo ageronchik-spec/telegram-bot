@@ -169,15 +169,34 @@ async def group_reply_handler(message: Message):
     anonymous_id, target_user_id = result
 
     try:
-        # 1. Отправляем уведомление с номером поста
-        await bot.send_message(
-            chat_id=target_user_id,
-            text=f"💬 <b>Ответ на твой анонимный пост #{anonymous_id}:</b>",
-            parse_mode="HTML"
-        )
-        
-        # 2. Пересылаем точное сообщение (фото с подписью, текст, стикер и т.д.)
-        await message.copy_message(chat_id=target_user_id)
+        header = f"💬 <b>Ответ на твой анонимный пост #{anonymous_id}:</b>"
+
+        # 1. Если ответили фотографией
+        if message.photo:
+            caption_text = f"{header}\n\n{message.caption}" if message.caption else header
+            await bot.send_photo(
+                chat_id=target_user_id,
+                photo=message.photo[-1].file_id,
+                caption=caption_text,
+                parse_mode="HTML"
+            )
+
+        # 2. Если ответили обычным текстом
+        elif message.text:
+            await bot.send_message(
+                chat_id=target_user_id,
+                text=f"{header}\n\n{message.text}",
+                parse_mode="HTML"
+            )
+
+        # 3. Для остальных типов медиа (стикеры, видео, голосовые)
+        else:
+            await bot.send_message(
+                chat_id=target_user_id,
+                text=header,
+                parse_mode="HTML"
+            )
+            await message.copy_message(chat_id=target_user_id)
 
     except TelegramAPIError:
         await message.reply("❌ Не удалось доставить ответ (пользователь заблокировал бота).")

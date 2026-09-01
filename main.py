@@ -93,7 +93,6 @@ async def anonymous_message(message: Message):
         )
         await db.commit()
 
-    # Реакция от бота при получении сообщения
     try:
         await message.react([ReactionTypeEmoji(emoji="👍")])
     except Exception:
@@ -143,7 +142,6 @@ async def anonymous_photo(message: Message):
         )
         await db.commit()
 
-    # Реакция от бота при получении фото
     try:
         await message.react([ReactionTypeEmoji(emoji="👍")])
     except Exception:
@@ -160,7 +158,6 @@ async def anonymous_photo(message: Message):
 
 @dp.message_reaction(F.chat.id == ANON_CHAT_ID)
 async def reaction_handler(reaction: MessageReactionUpdated):
-    # Если реакцию сняли, ничего не делаем
     if not reaction.new_reaction:
         return
 
@@ -182,7 +179,6 @@ async def reaction_handler(reaction: MessageReactionUpdated):
     anonymous_id, target_user_id = result
     last_reaction = reaction.new_reaction[-1]
 
-    # Если реакция стандартная (эмодзи)
     if hasattr(last_reaction, "emoji"):
         emoji = last_reaction.emoji
         try:
@@ -305,7 +301,8 @@ async def who_handler(message: Message):
 async def main():
     await init_db()
     print("Bot started")
-    await dp.start_polling(bot)
+    # Передаем allowed_updates, чтобы Telegram отправлял боту события реакций
+    await dp.start_polling(bot, allowed_updates=["message", "message_reaction"])
 
 if __name__ == "__main__":
     asyncio.run(main())

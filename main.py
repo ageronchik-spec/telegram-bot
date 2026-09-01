@@ -24,9 +24,15 @@ async def init_db():
             user_id INTEGER NOT NULL,
             username TEXT,
             first_name TEXT,
+            user_message_id INTEGER,
             telegram_message_id INTEGER
         )
         """)
+        # Миграция: добавляем колонку user_message_id, если её ещё нет
+        try:
+            await db.execute("ALTER TABLE anonymous_messages ADD COLUMN user_message_id INTEGER")
+        except Exception:
+            pass
         await db.commit()
 
 # -----------------------
@@ -53,7 +59,7 @@ async def start_handler(message: Message):
         "👤 Анонимный чат\n\n"
         "Отправь мне сообщение или фото в личку, "
         "и я опубликую его в группе анонимно.\n\n"
-        "Если на твой пост ответят или поставят реакцию в группе, бот пришлёт уведомление тебе сюда!"
+        "Если на твой пост ответят или поставят реакцию в группе, бот дублирует её сюда!"
     )
 
 # -----------------------
@@ -70,10 +76,10 @@ async def anonymous_message(message: Message):
     async with aiosqlite.connect("anonymous.db") as db:
         cursor = await db.execute(
             """
-            INSERT INTO anonymous_messages (user_id, username, first_name)
-            VALUES (?, ?, ?)
+            INSERT INTO anonymous_messages (user_id, username, first_name, user_message_id)
+            VALUES (?, ?, ?, ?)
             """,
-            (user.id, user.username, user.first_name)
+            (user.id, user.username, user.first_name, message.message_id)
         )
         await db.commit()
         anonymous_id = cursor.lastrowid
@@ -93,11 +99,6 @@ async def anonymous_message(message: Message):
         )
         await db.commit()
 
-    try:
-        await message.react([ReactionTypeEmoji(emoji="👍")])
-    except Exception:
-        pass
-
     await message.answer(
         f"✅ Сообщение отправлено анонимно.\n"
         f"Номер: #{anonymous_id}"
@@ -114,10 +115,10 @@ async def anonymous_photo(message: Message):
     async with aiosqlite.connect("anonymous.db") as db:
         cursor = await db.execute(
             """
-            INSERT INTO anonymous_messages (user_id, username, first_name)
-            VALUES (?, ?, ?)
+            INSERT INTO anonymous_messages (user_id, username, first_name, user_message_id)
+            VALUES (?, ?, ?, ?)
             """,
-            (user.id, user.username, user.first_name)
+            (user.id, user.username, user.first_name, message.message_id)
         )
         await db.commit()
         anonymous_id = cursor.lastrowid
@@ -142,31 +143,23 @@ async def anonymous_photo(message: Message):
         )
         await db.commit()
 
-    try:
-        await message.react([ReactionTypeEmoji(emoji="👍")])
-    except Exception:
-        pass
-
     await message.answer(
         f"✅ Фотография отправлена анонимно.\n"
         f"Номер: #{anonymous_id}"
     )
 
 # -----------------------
-# Обработка реакций из группы (Группа -> ЛС автору)
+# Обработка реакций из группы (Группа -> Реакция в ЛС)
 # -----------------------
 
 @dp.message_reaction(F.chat.id == ANON_CHAT_ID)
 async def reaction_handler(reaction: MessageReactionUpdated):
-    if not reaction.new_reaction:
-        return
-
     msg_id = reaction.message_id
 
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute(
             """
-            SELECT id, user_id FROM anonymous_messages
+            SELECT user_id, user_message_id FROM anonymous_messages
             WHERE telegram_message_id = ?
             """,
             (msg_id,)
@@ -176,18 +169,35 @@ async def reaction_handler(reaction: MessageReactionUpdated):
     if not result:
         return
 
-    anonymous_id, target_user_id = result
-    last_reaction = reaction.new_reaction[-1]
+    target_user_id, user_msg_id = result
 
-    if hasattr(last_reaction, "emoji"):
-        emoji = last_reaction.emoji
-        try:
-            await bot.send_message(
+    # Проверяем, что ID сообщения из ЛС сохранено в базе
+    if not user_msg_id:
+        return
+
+    try:
+        # Если в группе поставили реакцию — передаем её же в ЛС на сообщение пользователя
+        if reaction.new_reaction:
+            new_reactions = []
+            for r in reaction.new_reaction:
+                if hasattr(r, "emoji"):
+                    new_reactions.append(ReactionTypeEmoji(emoji=r.emoji))
+            
+            if new_reactions:
+                await bot.set_message_reaction(
+                    chat_id=target_user_id,
+                    message_id=user_msg_id,
+                    reaction=new_reactions
+                )
+        # Если реакцию в группе сняли — снимаем реакцию и в ЛС
+        else:
+            await bot.set_message_reaction(
                 chat_id=target_user_id,
-                text=f"{emoji} На твой анонимный пост #{anonymous_id} поставили реакцию!"
+                message_id=user_msg_id,
+                reaction=[]
             )
-        except TelegramAPIError:
-            pass
+    except TelegramAPIError:
+        pass
 
 # -----------------------
 # Обработка ответов в группе (Группа -> ЛС автору)
@@ -301,7 +311,6 @@ async def who_handler(message: Message):
 async def main():
     await init_db()
     print("Bot started")
-    # Передаем allowed_updates, чтобы Telegram отправлял боту события реакций
     await dp.start_polling(bot, allowed_updates=["message", "message_reaction"])
 
 if __name__ == "__main__":

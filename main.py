@@ -1,12 +1,12 @@
 import asyncio
 import sqlite3
-
+import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 
-BOT_TOKEN = "YOUR_BOT_TOKEN"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ID группы, куда будут уходить анонимные сообщения.
 # Обычно ID супергруппы выглядит примерно так:

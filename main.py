@@ -9,7 +9,7 @@ from aiogram.types import Message
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ID группы, куда будут уходить анонимные сообщения.
-ANON_CHAT_ID = -5403851337
+ANON_CHAT_ID = -1005403851337
 
 
 bot = Bot(BOT_TOKEN)

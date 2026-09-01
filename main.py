@@ -99,11 +99,6 @@ async def anonymous_message(message: Message):
         )
         await db.commit()
 
-    await message.answer(
-        f"✅ Сообщение отправлено анонимно.\n"
-        f"Номер: #{anonymous_id}"
-    )
-
 # -----------------------
 # Анонимные фотографии (ЛС -> Группа)
 # -----------------------
@@ -143,11 +138,6 @@ async def anonymous_photo(message: Message):
         )
         await db.commit()
 
-    await message.answer(
-        f"✅ Фотография отправлена анонимно.\n"
-        f"Номер: #{anonymous_id}"
-    )
-
 # -----------------------
 # Обработка реакций из группы (Группа -> Реакция в ЛС)
 # -----------------------
@@ -171,12 +161,10 @@ async def reaction_handler(reaction: MessageReactionUpdated):
 
     target_user_id, user_msg_id = result
 
-    # Проверяем, что ID сообщения из ЛС сохранено в базе
     if not user_msg_id:
         return
 
     try:
-        # Если в группе поставили реакцию — передаем её же в ЛС на сообщение пользователя
         if reaction.new_reaction:
             new_reactions = []
             for r in reaction.new_reaction:
@@ -189,7 +177,6 @@ async def reaction_handler(reaction: MessageReactionUpdated):
                     message_id=user_msg_id,
                     reaction=new_reactions
                 )
-        # Если реакцию в группе сняли — снимаем реакцию и в ЛС
         else:
             await bot.set_message_reaction(
                 chat_id=target_user_id,

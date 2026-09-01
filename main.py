@@ -7,8 +7,7 @@ from aiogram.types import Message
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ANON_CHAT_ID = -5403851337
-
+ANON_CHAT_ID = -1003896678128
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 

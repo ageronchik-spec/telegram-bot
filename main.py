@@ -4,6 +4,7 @@ import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
+from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ANON_CHAT_ID = -1003896678128
@@ -52,11 +53,11 @@ async def start_handler(message: Message):
         "👤 Анонимный чат\n\n"
         "Отправь мне сообщение или фото в личку, "
         "и я опубликую его в группе анонимно.\n\n"
-        "Другие участники не увидят твой профиль."
+        "Если на твой пост ответят в группе, бот пришлёт этот ответ тебе сюда!"
     )
 
 # -----------------------
-# Анонимные текстовые сообщения
+# Анонимные текстовые сообщения (ЛС -> Группа)
 # -----------------------
 
 @dp.message(F.chat.type == "private", F.text)
@@ -98,7 +99,7 @@ async def anonymous_message(message: Message):
     )
 
 # -----------------------
-# Анонимные фотографии
+# Анонимные фотографии (ЛС -> Группа)
 # -----------------------
 
 @dp.message(F.chat.type == "private", F.photo)
@@ -140,6 +141,47 @@ async def anonymous_photo(message: Message):
         f"✅ Фотография отправлена анонимно.\n"
         f"Номер: #{anonymous_id}"
     )
+
+# -----------------------
+# Обработка ответов в группе (Группа -> ЛС автору)
+# -----------------------
+
+@dp.message(F.chat.id == ANON_CHAT_ID, F.reply_to_message)
+async def group_reply_handler(message: Message):
+    # Игнорируем ответы на сообщения бота, содержащие команды вроде /who
+    if message.text and message.text.startswith("/"):
+        return
+
+    replied_msg_id = message.reply_to_message.message_id
+
+    # Ищем в БД автора сообщения, на которое ответили
+    async with aiosqlite.connect("anonymous.db") as db:
+        async with db.execute(
+            """
+            SELECT id, user_id FROM anonymous_messages
+            WHERE telegram_message_id = ?
+            """,
+            (replied_msg_id,)
+        ) as cursor:
+            result = await cursor.fetchone()
+
+    # Если исходное сообщение не найдено в БД (например, ответили не на анонимку) — ничего не делаем
+    if not result:
+        return
+
+    anonymous_id, target_user_id = result
+
+    try:
+        # Уведомляем автора и дублируем ответ
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=f"💬 **Вам пришел ответ на анонимный пост #{anonymous_id}:**",
+            parse_mode="Markdown"
+        )
+        await message.copy_message(chat_id=target_user_id)
+    except TelegramAPIError:
+        # Ошибка возникает, если пользователь заблокировал бота
+        await message.reply("❌ Не удалось доставить ответ (возможно, автор заблокировал бота).")
 
 # -----------------------
 # Команда /who

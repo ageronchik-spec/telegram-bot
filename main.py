@@ -59,7 +59,7 @@ async def start_handler(message: Message):
         "👤 Анонимный чат\n\n"
         "Отправь мне сообщение или фото в личку, "
         "и я опубликую его в группе анонимно.\n\n"
-        "Если на твой пост ответят или поставят реакцию в группе, бот дублирует её сюда!"
+        "Если на твой пост ответят или поставят реакцию в группе, бот перешлёт всё сюда!"
     )
 
 # -----------------------
@@ -187,7 +187,7 @@ async def reaction_handler(reaction: MessageReactionUpdated):
         pass
 
 # -----------------------
-# Обработка ответов в группе (Группа -> ЛС автору)
+# Обработка ответов в группе (Группа -> Reply в ЛС)
 # -----------------------
 
 @dp.message(F.chat.id == ANON_CHAT_ID, F.reply_to_message)
@@ -200,7 +200,7 @@ async def group_reply_handler(message: Message):
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute(
             """
-            SELECT id, user_id FROM anonymous_messages
+            SELECT id, user_id, user_message_id FROM anonymous_messages
             WHERE telegram_message_id = ?
             """,
             (replied_msg_id,)
@@ -210,32 +210,29 @@ async def group_reply_handler(message: Message):
     if not result:
         return
 
-    anonymous_id, target_user_id = result
+    anonymous_id, target_user_id, user_msg_id = result
 
     try:
-        header = f"💬 <b>Ответ на твой анонимный пост #{anonymous_id}:</b>"
-
+        # Указываем reply_to_message_id, чтобы бота ответил конкретно на сообщение пользователя в ЛС
         if message.photo:
-            caption_text = f"{header}\n\n{message.caption}" if message.caption else header
+            caption_text = message.caption if message.caption else None
             await bot.send_photo(
                 chat_id=target_user_id,
                 photo=message.photo[-1].file_id,
                 caption=caption_text,
-                parse_mode="HTML"
+                reply_to_message_id=user_msg_id
             )
         elif message.text:
             await bot.send_message(
                 chat_id=target_user_id,
-                text=f"{header}\n\n{message.text}",
-                parse_mode="HTML"
+                text=message.text,
+                reply_to_message_id=user_msg_id
             )
         else:
-            await bot.send_message(
+            await message.copy_message(
                 chat_id=target_user_id,
-                text=header,
-                parse_mode="HTML"
+                reply_to_message_id=user_msg_id
             )
-            await message.copy_message(chat_id=target_user_id)
 
     except TelegramAPIError:
         await message.reply("❌ Не удалось доставить ответ (пользователь заблокировал бота).")

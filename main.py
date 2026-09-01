@@ -148,13 +148,11 @@ async def anonymous_photo(message: Message):
 
 @dp.message(F.chat.id == ANON_CHAT_ID, F.reply_to_message)
 async def group_reply_handler(message: Message):
-    # Игнорируем ответы на сообщения бота, содержащие команды вроде /who
     if message.text and message.text.startswith("/"):
         return
 
     replied_msg_id = message.reply_to_message.message_id
 
-    # Ищем в БД автора сообщения, на которое ответили
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute(
             """
@@ -165,23 +163,34 @@ async def group_reply_handler(message: Message):
         ) as cursor:
             result = await cursor.fetchone()
 
-    # Если исходное сообщение не найдено в БД (например, ответили не на анонимку) — ничего не делаем
     if not result:
         return
 
     anonymous_id, target_user_id = result
 
+    reply_content = message.text or message.caption or "[Медиасообщение]"
+
     try:
-        # Уведомляем автора и дублируем ответ
-        await bot.send_message(
-            chat_id=target_user_id,
-            text=f"💬 **Вам пришел ответ на анонимный пост #{anonymous_id}:**",
-            parse_mode="Markdown"
-        )
-        await message.copy_message(chat_id=target_user_id)
+        if message.text:
+            await bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    f"💬 **Ответ на твой анонимный пост #{anonymous_id}:**\n\n"
+                    f"{reply_content}"
+                ),
+                parse_mode="Markdown"
+            )
+        else:
+            caption_prefix = f"💬 **Ответ на твой анонимный пост #{anonymous_id}:**"
+            full_caption = f"{caption_prefix}\n\n{message.caption}" if message.caption else caption_prefix
+            
+            await message.copy_message(
+                chat_id=target_user_id,
+                caption=full_caption,
+                parse_mode="Markdown"
+            )
     except TelegramAPIError:
-        # Ошибка возникает, если пользователь заблокировал бота
-        await message.reply("❌ Не удалось доставить ответ (возможно, автор заблокировал бота).")
+        await message.reply("❌ Не удалось доставить ответ (пользователь заблокировал бота).")
 
 # -----------------------
 # Команда /who

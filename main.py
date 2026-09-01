@@ -9,8 +9,6 @@ from aiogram.types import Message
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ID группы, куда будут уходить анонимные сообщения.
-# Обычно ID супергруппы выглядит примерно так:
-# -1001234567890
 ANON_CHAT_ID = -5403851337
 
 
@@ -64,14 +62,14 @@ async def start_handler(message: Message):
 
     await message.answer(
         "👤 Анонимный чат\n\n"
-        "Отправь мне сообщение в личку, "
+        "Отправь мне сообщение или фото в личку, "
         "и я опубликую его в группе анонимно.\n\n"
         "Другие участники не увидят твой профиль."
     )
 
 
 # -----------------------
-# Анонимные сообщения
+# Анонимные текстовые сообщения
 # -----------------------
 
 @dp.message(F.chat.type == "private", F.text)
@@ -132,11 +130,68 @@ async def anonymous_message(message: Message):
 
 
 # -----------------------
+# Анонимные фотографии
+# -----------------------
+
+@dp.message(F.chat.type == "private", F.photo)
+async def anonymous_photo(message: Message):
+
+    user = message.from_user
+
+    # Сохраняем автора в БД
+    cursor.execute(
+        """
+        INSERT INTO anonymous_messages
+        (user_id, username, first_name)
+        VALUES (?, ?, ?)
+        """,
+        (
+            user.id,
+            user.username,
+            user.first_name
+        )
+    )
+
+    db.commit()
+
+    anonymous_id = cursor.lastrowid
+
+    # Формируем подпись (сохраняем оригинальную подпись к фото, если она была)
+    caption_text = f"🥷 Аноним #{anonymous_id}"
+    if message.caption:
+        caption_text += f"\n\n{message.caption}"
+
+    # Отправляем фото в высшем качестве (photo[-1])
+    sent_message = await bot.send_photo(
+        chat_id=ANON_CHAT_ID,
+        photo=message.photo[-1].file_id,
+        caption=caption_text
+    )
+
+    # Запоминаем ID сообщения
+    cursor.execute(
+        """
+        UPDATE anonymous_messages
+        SET telegram_message_id = ?
+        WHERE id = ?
+        """,
+        (
+            sent_message.message_id,
+            anonymous_id
+        )
+    )
+
+    db.commit()
+
+    await message.answer(
+        f"✅ Фотография отправлена анонимно.\n"
+        f"Номер: #{anonymous_id}"
+    )
+
+
+# -----------------------
 # /who
 # Только для администраторов
-#
-# Использование:
-# /who 15
 # -----------------------
 
 @dp.message(Command("who"))

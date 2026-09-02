@@ -16,18 +16,20 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ANON_CHAT_ID = -1003896678128
-ADMIN_ID = 7710764694  # ⚠️ УКАЖИ ЗДЕСЬ СВОЙ TELEGRAM USER ID
+SUPER_ADMIN_ID = 123456789  # ⚠️ Укажите ваш личный Telegram ID (Главный админ бота для авторизации)
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 # -----------------------
-# Состояния FSM (для авторизации)
+# Состояния FSM
 # -----------------------
 
 class AuthState(StatesGroup):
     waiting_for_credentials = State()
+
+class AdminState(StatesGroup):
+    waiting_for_group_id = State()
 
 # -----------------------
 # Инициализация базы данных
@@ -35,10 +37,11 @@ class AuthState(StatesGroup):
 
 async def init_db():
     async with aiosqlite.connect("anonymous.db") as db:
-        # Таблица сообщений
+        # Таблица сообщений (добавлена колонка group_id)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS anonymous_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER,
             user_id INTEGER NOT NULL,
             username TEXT,
             first_name TEXT,
@@ -46,34 +49,50 @@ async def init_db():
             telegram_message_id INTEGER
         )
         """)
-        
-        # Таблица авторизованных пользователей (0 - на проверке, 1 - одобрен)
+
+        # Таблица пользователей (привязанная группа + статус одобрения)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
+            group_id INTEGER,
             is_approved INTEGER DEFAULT 0
         )
         """)
 
+        # Миграция: добавляем group_id, если таблицы уже существовали
         try:
-            await db.execute("ALTER TABLE anonymous_messages ADD COLUMN user_message_id INTEGER")
+            await db.execute("ALTER TABLE anonymous_messages ADD COLUMN group_id INTEGER")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN group_id INTEGER")
+        except Exception:
+            pass
+
         await db.commit()
 
 # -----------------------
-# Вспомогательные функции авторизации
+# Вспомогательные функции
 # -----------------------
 
+async def get_user_group_id(user_id: int) -> int | None:
+    """Возвращает ID группы, привязанной к пользователю."""
+    async with aiosqlite.connect("anonymous.db") as db:
+        async with db.execute("SELECT group_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else None
+
 async def is_user_approved(user_id: int) -> bool:
+    """Проверяет, авторизован ли пользователь."""
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute("SELECT is_approved FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return bool(row and row[0] == 1)
 
 async def set_user_approval(user_id: int, approved: bool):
+    """Обновляет статус авторизации пользователя."""
     async with aiosqlite.connect("anonymous.db") as db:
         await db.execute(
             """
@@ -84,12 +103,10 @@ async def set_user_approval(user_id: int, approved: bool):
         )
         await db.commit()
 
-async def is_admin(user_id: int) -> bool:
+async def is_group_admin(chat_id: int, user_id: int) -> bool:
+    """Проверяет, является ли пользователь администратором в указанной группе."""
     try:
-        member = await bot.get_chat_member(
-            chat_id=ANON_CHAT_ID,
-            user_id=user_id
-        )
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return member.status in ("administrator", "creator")
     except Exception:
         return False
@@ -100,9 +117,22 @@ async def is_admin(user_id: int) -> bool:
 
 @dp.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext):
+    if message.chat.type != "private":
+        return
+
     user_id = message.from_user.id
-    
-    # Если пользователь уже авторизован — показываем стандартную инструкцию
+
+    # Проверка привязанной группы
+    group_id = await get_user_group_id(user_id)
+    if not group_id:
+        await message.answer(
+            "⚠️ <b>Группа не привязана!</b>\n\n"
+            "Сначала добавьте бота в вашу группу, сделайте его администратором и введите команду /admin, чтобы указать ID группы.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Если пользователь авторизован — отправляем инструкцию
     if await is_user_approved(user_id):
         welcome_text = (
             "📌 Инструкция по проверке номеров и запросам:\n"
@@ -121,7 +151,7 @@ async def start_handler(message: Message, state: FSMContext):
         await message.answer(welcome_text)
         return
 
-    # Если не авторизован — просим ввести данные
+    # Запрос данных для авторизации
     await state.set_state(AuthState.waiting_for_credentials)
     await message.answer(
         "🔒 <b>Авторизация необходима!</b>\n\n"
@@ -131,7 +161,64 @@ async def start_handler(message: Message, state: FSMContext):
     )
 
 # -----------------------
-# Ввод данных авторизации пользователем
+# Команда /admin (Привязка группы)
+# -----------------------
+
+@dp.message(Command("admin"), F.chat.type == "private")
+async def admin_command_handler(message: Message, state: FSMContext):
+    await state.set_state(AdminState.waiting_for_group_id)
+    await message.answer(
+        "⚙️ <b>Настройка группы для бота</b>\n\n"
+        "1. Добавьте бота в нужную группу.\n"
+        "2. Выдайте боту права администратора.\n"
+        "3. Введите здесь <b>ID группы</b> (начинается с минус-знака, например: <code>-1003896678128</code>).\n\n"
+        "💡 <i>Чтобы узнать ID группы, закройте с ботом диалог и перешлите сюда любое сообщение из вашей группы или используйте спец. ботов (@userinfobot).</i>",
+        parse_mode="HTML"
+    )
+
+@dp.message(AdminState.waiting_for_group_id)
+async def process_group_id(message: Message, state: FSMContext):
+    try:
+        group_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Некорректный формат ID. Отправьте числовой ID группы (например, `-100123456789`).")
+        return
+
+    # Проверяем, состоит ли бот в этой группе
+    try:
+        chat = await bot.get_chat(group_id)
+    except Exception:
+        await message.answer("❌ Бот не найден в этой группе. Убедитесь, что вы добавили бота в группу и указали верный ID.")
+        return
+
+    # Проверяем, является ли отправитель админом в этой группе
+    if not await is_group_admin(group_id, message.from_user.id):
+        await message.answer("❌ Вы не являетесь администратором или создателем этой группы!")
+        return
+
+    # Сохраняем привязку в базу данных
+    async with aiosqlite.connect("anonymous.db") as db:
+        await db.execute(
+            """
+            INSERT INTO users (user_id, username, first_name, group_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET group_id = excluded.group_id
+            """,
+            (message.from_user.id, message.from_user.username, message.from_user.first_name, group_id)
+        )
+        await db.commit()
+
+    await state.clear()
+    await message.answer(
+        f"✅ <b>Группа успешно привязана!</b>\n\n"
+        f"Название группы: <b>{chat.title}</b>\n"
+        f"ID группы: <code>{group_id}</code>\n\n"
+        f"Теперь введите /start для продолжения.",
+        parse_mode="HTML"
+    )
+
+# -----------------------
+# Обработка авторизации
 # -----------------------
 
 @dp.message(AuthState.waiting_for_credentials)
@@ -140,13 +227,10 @@ async def process_credentials(message: Message, state: FSMContext):
     credentials_text = message.text
 
     await state.clear()
-
-    # Сохраняем в БД со статусом 0 (ожидает)
     await set_user_approval(user.id, False)
 
     await message.answer("⌛ Ваши данные отправлены на проверку администратору. Ожидайте подтверждения.")
 
-    # Кнопки для администратора
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{user.id}"),
@@ -154,7 +238,6 @@ async def process_credentials(message: Message, state: FSMContext):
         ]
     ])
 
-    # Уведомляем администратора
     username_str = f"@{user.username}" if user.username else "нет username"
     admin_msg = (
         "📥 <b>Новая заявка на авторизацию!</b>\n\n"
@@ -164,13 +247,9 @@ async def process_credentials(message: Message, state: FSMContext):
     )
 
     try:
-        await bot.send_message(chat_id=ADMIN_ID, text=admin_msg, reply_markup=admin_kb, parse_mode="HTML")
+        await bot.send_message(chat_id=SUPER_ADMIN_ID, text=admin_msg, reply_markup=admin_kb, parse_mode="HTML")
     except Exception as e:
-        print(f"Ошибка отправки админу: {e}")
-
-# -----------------------
-# Обработка нажатий кнопок админа (Одобрить / Отклонить)
-# -----------------------
+        print(f"Ошибка отправки главному админу: {e}")
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve_user_callback(callback: CallbackQuery):
@@ -182,7 +261,6 @@ async def approve_user_callback(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-    # Уведомляем пользователя
     welcome_text = (
         "🎉 <b>Ваш доступ подтвержден!</b>\n\n"
         "📌 Инструкция по проверке номеров и запросам:\n"
@@ -213,10 +291,7 @@ async def reject_user_callback(callback: CallbackQuery):
     )
 
     try:
-        await bot.send_message(
-            chat_id=target_user_id,
-            text="❌ Ваша заявка на доступ была отклонена администратором."
-        )
+        await bot.send_message(chat_id=target_user_id, text="❌ Ваша заявка на доступ была отклонена администратором.")
     except TelegramAPIError:
         pass
 
@@ -226,7 +301,14 @@ async def reject_user_callback(callback: CallbackQuery):
 
 @dp.message(F.chat.type == "private", F.reply_to_message)
 async def user_reply_in_pm(message: Message):
-    if not await is_user_approved(message.from_user.id):
+    user_id = message.from_user.id
+    group_id = await get_user_group_id(user_id)
+
+    if not group_id:
+        await message.answer("⚠️ Ваша группа не настроена. Введите /admin для настройки.")
+        return
+
+    if not await is_user_approved(user_id):
         await message.answer("🔒 Вы не авторизованы. Нажмите /start для авторизации.")
         return
 
@@ -254,24 +336,24 @@ async def user_reply_in_pm(message: Message):
             if message.caption:
                 caption_text += f"\n\n{message.caption}"
             await bot.send_photo(
-                chat_id=ANON_CHAT_ID,
+                chat_id=group_id,
                 photo=message.photo[-1].file_id,
                 caption=caption_text,
                 reply_to_message_id=group_msg_id
             )
         elif message.text:
             await bot.send_message(
-                chat_id=ANON_CHAT_ID,
+                chat_id=group_id,
                 text=f"🥷 Аноним #{anonymous_id}\n\n{message.text}",
                 reply_to_message_id=group_msg_id
             )
         else:
             await message.copy_message(
-                chat_id=ANON_CHAT_ID,
+                chat_id=group_id,
                 reply_to_message_id=group_msg_id
             )
-    except TelegramAPIError:
-        pass
+    except TelegramAPIError as e:
+        await message.answer(f"❌ Ошибка отправки в группу: {e}")
 
 # -----------------------
 # Анонимные текстовые сообщения
@@ -279,7 +361,14 @@ async def user_reply_in_pm(message: Message):
 
 @dp.message(F.chat.type == "private", F.text)
 async def anonymous_message(message: Message):
-    if not await is_user_approved(message.from_user.id):
+    user_id = message.from_user.id
+    group_id = await get_user_group_id(user_id)
+
+    if not group_id:
+        await message.answer("⚠️ Ваша группа не настроена. Введите /admin для настройки.")
+        return
+
+    if not await is_user_approved(user_id):
         await message.answer("🔒 Вы не авторизованы. Нажмите /start для авторизации.")
         return
 
@@ -291,16 +380,16 @@ async def anonymous_message(message: Message):
     async with aiosqlite.connect("anonymous.db") as db:
         cursor = await db.execute(
             """
-            INSERT INTO anonymous_messages (user_id, username, first_name, user_message_id)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO anonymous_messages (group_id, user_id, username, first_name, user_message_id)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (user.id, user.username, user.first_name, message.message_id)
+            (group_id, user.id, user.username, user.first_name, message.message_id)
         )
         await db.commit()
         anonymous_id = cursor.lastrowid
 
         sent_message = await bot.send_message(
-            chat_id=ANON_CHAT_ID,
+            chat_id=group_id,
             text=f"🥷 Аноним #{anonymous_id}\n\n{message.text}"
         )
 
@@ -316,7 +405,14 @@ async def anonymous_message(message: Message):
 
 @dp.message(F.chat.type == "private", F.photo)
 async def anonymous_photo(message: Message):
-    if not await is_user_approved(message.from_user.id):
+    user_id = message.from_user.id
+    group_id = await get_user_group_id(user_id)
+
+    if not group_id:
+        await message.answer("⚠️ Ваша группа не настроена. Введите /admin для настройки.")
+        return
+
+    if not await is_user_approved(user_id):
         await message.answer("🔒 Вы не авторизованы. Нажмите /start для авторизации.")
         return
 
@@ -325,10 +421,10 @@ async def anonymous_photo(message: Message):
     async with aiosqlite.connect("anonymous.db") as db:
         cursor = await db.execute(
             """
-            INSERT INTO anonymous_messages (user_id, username, first_name, user_message_id)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO anonymous_messages (group_id, user_id, username, first_name, user_message_id)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (user.id, user.username, user.first_name, message.message_id)
+            (group_id, user.id, user.username, user.first_name, message.message_id)
         )
         await db.commit()
         anonymous_id = cursor.lastrowid
@@ -338,7 +434,7 @@ async def anonymous_photo(message: Message):
             caption_text += f"\n\n{message.caption}"
 
         sent_message = await bot.send_photo(
-            chat_id=ANON_CHAT_ID,
+            chat_id=group_id,
             photo=message.photo[-1].file_id,
             caption=caption_text
         )
@@ -353,14 +449,15 @@ async def anonymous_photo(message: Message):
 # Обработка реакций из группы
 # -----------------------
 
-@dp.message_reaction(F.chat.id == ANON_CHAT_ID)
+@dp.message_reaction()
 async def reaction_handler(reaction: MessageReactionUpdated):
     msg_id = reaction.message_id
+    chat_id = reaction.chat.id
 
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute(
-            "SELECT user_id, user_message_id FROM anonymous_messages WHERE telegram_message_id = ?",
-            (msg_id,)
+            "SELECT user_id, user_message_id FROM anonymous_messages WHERE telegram_message_id = ? AND group_id = ?",
+            (msg_id, chat_id)
         ) as cursor:
             result = await cursor.fetchone()
 
@@ -397,17 +494,18 @@ async def reaction_handler(reaction: MessageReactionUpdated):
 # Обработка ответов в группе
 # -----------------------
 
-@dp.message(F.chat.id == ANON_CHAT_ID, F.reply_to_message)
+@dp.message(F.chat.type.in_({"group", "supergroup"}), F.reply_to_message)
 async def group_reply_handler(message: Message):
     if message.text and message.text.startswith("/"):
         return
 
     replied_msg_id = message.reply_to_message.message_id
+    chat_id = message.chat.id
 
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute(
-            "SELECT id, user_id, user_message_id FROM anonymous_messages WHERE telegram_message_id = ?",
-            (replied_msg_id,)
+            "SELECT id, user_id, user_message_id FROM anonymous_messages WHERE telegram_message_id = ? AND group_id = ?",
+            (replied_msg_id, chat_id)
         ) as cursor:
             result = await cursor.fetchone()
 
@@ -440,15 +538,12 @@ async def group_reply_handler(message: Message):
         await message.reply("❌ Не удалось доставить ответ (пользователь заблокировал бота).")
 
 # -----------------------
-# Команда /who
+# Команда /who (работает в любой привязанной группе)
 # -----------------------
 
-@dp.message(Command("who"))
+@dp.message(Command("who"), F.chat.type.in_({"group", "supergroup"}))
 async def who_handler(message: Message):
-    if message.chat.id != ANON_CHAT_ID:
-        return
-
-    if not await is_admin(message.from_user.id):
+    if not await is_group_admin(message.chat.id, message.from_user.id):
         await message.reply("❌ Эта команда доступна только администраторам.")
         return
 
@@ -465,13 +560,13 @@ async def who_handler(message: Message):
 
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute(
-            "SELECT user_id, username, first_name FROM anonymous_messages WHERE id = ?",
-            (anonymous_id,)
+            "SELECT user_id, username, first_name FROM anonymous_messages WHERE id = ? AND group_id = ?",
+            (anonymous_id, message.chat.id)
         ) as cursor:
             result = await cursor.fetchone()
 
     if not result:
-        await message.reply("❌ Сообщение с таким номером не найдено.")
+        await message.reply("❌ Сообщение с таким номером не найдено в этой группе.")
         return
 
     user_id, username, first_name = result

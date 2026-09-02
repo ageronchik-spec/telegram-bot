@@ -147,11 +147,10 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
     user = message.from_user
     args = command.args
 
-    # 1. Переход по пригласительной ссылке — автоматическое одобрение без ручной проверки!
+    # 1. Переход по пригласительной ссылке — автоматическое одобрение без ручной проверки
     if args and args.startswith("group_"):
         try:
             target_group_id = int(args.replace("group_", ""))
-            # Автоматически выдаем доступ (approved=True)
             await bind_user_to_group(user.id, target_group_id, user.username, user.first_name, approved=True)
             await state.clear()
             await message.answer("✅ <b>Доступ успешно получен!</b>\n\n" + WELCOME_TEXT, parse_mode="HTML")
@@ -185,7 +184,7 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
     )
 
 # -----------------------
-# Команда /admin (Привязка группы + инвайт-ссылка)
+# Команда /admin (Привязка группы + Уведомление в ЛС главного админа)
 # -----------------------
 
 @dp.message(Command("admin"), F.chat.type == "private")
@@ -211,27 +210,46 @@ async def process_group_id(message: Message, state: FSMContext):
     try:
         chat = await bot.get_chat(group_id)
     except Exception:
-        await message.answer("❌ Бот не найден в этой группе.")
+        await message.answer("❌ Бот не найден в этой группе. Убедитесь, что бот добавлен туда.")
         return
 
     if not await is_group_admin(group_id, message.from_user.id):
         await message.answer("❌ Вы не являетесь администратором этой группы!")
         return
 
-    # Привязываем админа и сразу одобряем его
-    await bind_user_to_group(message.from_user.id, group_id, message.from_user.username, message.from_user.first_name, approved=True)
+    user = message.from_user
+
+    # Привязываем админа группы и сразу одобряем его
+    await bind_user_to_group(user.id, group_id, user.username, user.first_name, approved=True)
     await state.clear()
 
     bot_info = await bot.get_me()
     invite_link = f"https://t.me/{bot_info.username}?start=group_{group_id}"
 
+    # Отправляем ответ админу группы
     await message.answer(
         f"✅ <b>Группа «{chat.title}» успешно привязана!</b>\n\n"
         f"🔗 <b>Пригласительная ссылка для сотрудников:</b>\n"
         f"<code>{invite_link}</code>\n\n"
-        f"Перешлите эту ссылку вашим сотрудникам. Любой человек, перейдя по ней, <b>сразу же получит доступ к боту без подтверждения!</b>",
+        f"Перешлите эту ссылку вашим сотрудникам. Любой человек, перейдя по ней, сразу же получит доступ к боту без подтверждения!",
         parse_mode="HTML"
     )
+
+    # 📩 Отправляем запрос / уведомление в ЛС вам (SUPER_ADMIN_ID)
+    username_str = f"@{user.username}" if user.username else "нет username"
+    admin_notify_msg = (
+        "🔔 <b>Запрос / привязка новой группы через /admin!</b>\n\n"
+        f"👤 <b>Администратор:</b> {user.first_name} ({username_str})\n"
+        f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
+        f"👥 <b>Группа:</b> {chat.title}\n"
+        f"🆔 <b>Group ID:</b> <code>{group_id}</code>\n\n"
+        f"🔗 <b>Созданная инвайт-ссылка:</b>\n{invite_link}"
+    )
+
+    try:
+        await bot.send_message(chat_id=SUPER_ADMIN_ID, text=admin_notify_msg, parse_mode="HTML")
+    except Exception as e:
+        print(f"Ошибка при отправке уведомления SUPER_ADMIN_ID: {e}")
 
 # -----------------------
 # Авторизация пользователя (ручной ввод)

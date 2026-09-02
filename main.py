@@ -16,10 +16,26 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SUPER_ADMIN_ID = 7710764694  # ⚠️ Укажите ваш личный Telegram ID (Главный админ бота)
+SUPER_ADMIN_ID = 7710764694  # ⚠️ Твой личный Telegram ID
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
+
+# Текст приветственной инструкции
+WELCOME_TEXT = (
+    "📌 Инструкция по проверке номеров и запросам:\n"
+    "Проверка номеров:\n"
+    "Отправляйте фото анкеты, номер телефона и юзернейм Telegram (@username).\n"
+    "На ваше сообщение будет поставлена реакция:\n"
+    "🏆 Кубок — плюсовой номер\n"
+    "💩 Говно — минусовой номер\n\n"
+    "Запросы на сайты:\n"
+    "В начале сообщения обязательно отмечайте ответственного: @damn2788, затем указывайте ваш стейдж и сам запрос.\n"
+    "Пример:\n"
+    "@damn2788\n"
+    "Buivol\n"
+    "2 вкз на телефон"
+)
 
 # -----------------------
 # Состояния FSM
@@ -80,15 +96,18 @@ async def get_user_group_id(user_id: int) -> int | None:
             row = await cursor.fetchone()
             return row[0] if row and row[0] else None
 
-async def bind_user_to_group(user_id: int, group_id: int, username: str = None, first_name: str = None):
+async def bind_user_to_group(user_id: int, group_id: int, username: str = None, first_name: str = None, approved: bool = False):
+    """Привязывает пользователя к группе и опционально одобряет доступ."""
     async with aiosqlite.connect("anonymous.db") as db:
         await db.execute(
             """
-            INSERT INTO users (user_id, username, first_name, group_id)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET group_id = excluded.group_id
+            INSERT INTO users (user_id, username, first_name, group_id, is_approved)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET 
+                group_id = excluded.group_id,
+                is_approved = CASE WHEN excluded.is_approved = 1 THEN 1 ELSE users.is_approved END
             """,
-            (user_id, username, first_name, group_id)
+            (user_id, username, first_name, group_id, 1 if approved else 0)
         )
         await db.commit()
 
@@ -117,7 +136,7 @@ async def is_group_admin(chat_id: int, user_id: int) -> bool:
         return False
 
 # -----------------------
-# Команда /start (с поддержкой пригласительных ссылок)
+# Команда /start
 # -----------------------
 
 @dp.message(CommandStart())
@@ -126,17 +145,21 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
         return
 
     user = message.from_user
-    args = command.args  # Автоматический перехват параметрической ссылки (deep-linking)
+    args = command.args
 
-    # 1. Если пользователь пришел по пригласительной ссылке вида t.me/bot?start=group_XXXXX
+    # 1. Переход по пригласительной ссылке — автоматическое одобрение без ручной проверки!
     if args and args.startswith("group_"):
         try:
             target_group_id = int(args.replace("group_", ""))
-            await bind_user_to_group(user.id, target_group_id, user.username, user.first_name)
+            # Автоматически выдаем доступ (approved=True)
+            await bind_user_to_group(user.id, target_group_id, user.username, user.first_name, approved=True)
+            await state.clear()
+            await message.answer("✅ <b>Доступ успешно получен!</b>\n\n" + WELCOME_TEXT, parse_mode="HTML")
+            return
         except ValueError:
             pass
 
-    # 2. Проверяем, привязан ли пользователь к какой-либо группе
+    # 2. Проверяем привязанную группу
     group_id = await get_user_group_id(user.id)
     if not group_id:
         await message.answer(
@@ -147,26 +170,12 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
         )
         return
 
-    # 3. Если пользователь авторизован — показываем инструкцию
+    # 3. Если уже авторизован — показываем инструкцию
     if await is_user_approved(user.id):
-        welcome_text = (
-            "📌 Инструкция по проверке номеров и запросам:\n"
-            "Проверка номеров:\n"
-            "Отправляйте фото анкеты, номер телефона и юзернейм Telegram (@username).\n"
-            "На ваше сообщение будет поставлена реакция:\n"
-            "🏆 Кубок — плюсовой номер\n"
-            "💩 Говно — минусовой номер\n\n"
-            "Запросы на сайты:\n"
-            "В начале сообщения обязательно отмечайте ответственного: @damn2788, затем указывайте ваш стейдж и сам запрос.\n"
-            "Пример:\n"
-            "@damn2788\n"
-            "Buivol\n"
-            "2 вкз на телефон"
-        )
-        await message.answer(welcome_text)
+        await message.answer(WELCOME_TEXT)
         return
 
-    # 4. Если группа есть, но нет авторизации — просим ввести данные
+    # 4. Если зашел вручную, но не по инвайт-ссылке — отправляем запрос админу
     await state.set_state(AuthState.waiting_for_credentials)
     await message.answer(
         "🔒 <b>Авторизация необходима!</b>\n\n"
@@ -176,7 +185,7 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
     )
 
 # -----------------------
-# Команда /admin (Привязка группы + генерация инвайт-ссылки)
+# Команда /admin (Привязка группы + инвайт-ссылка)
 # -----------------------
 
 @dp.message(Command("admin"), F.chat.type == "private")
@@ -209,26 +218,23 @@ async def process_group_id(message: Message, state: FSMContext):
         await message.answer("❌ Вы не являетесь администратором этой группы!")
         return
 
-    # Сохраняем группу за админом
-    await bind_user_to_group(message.from_user.id, group_id, message.from_user.username, message.from_user.first_name)
+    # Привязываем админа и сразу одобряем его
+    await bind_user_to_group(message.from_user.id, group_id, message.from_user.username, message.from_user.first_name, approved=True)
     await state.clear()
 
-    # Формируем пригласительную ссылку для новых участников
     bot_info = await bot.get_me()
-    # Заменяем минус на символ, если ID группы отрицательный
-    raw_group_id = str(group_id).replace("-", "")
     invite_link = f"https://t.me/{bot_info.username}?start=group_{group_id}"
 
     await message.answer(
         f"✅ <b>Группа «{chat.title}» успешно привязана!</b>\n\n"
         f"🔗 <b>Пригласительная ссылка для сотрудников:</b>\n"
         f"<code>{invite_link}</code>\n\n"
-        f"Перешлите эту ссылку вашим сотрудникам. Перейдя по ней, они автоматически привяжутся к этой группе и смогут сразу пройти авторизацию без настройки ID!",
+        f"Перешлите эту ссылку вашим сотрудникам. Любой человек, перейдя по ней, <b>сразу же получит доступ к боту без подтверждения!</b>",
         parse_mode="HTML"
     )
 
 # -----------------------
-# Авторизация пользователя
+# Авторизация пользователя (ручной ввод)
 # -----------------------
 
 @dp.message(AuthState.waiting_for_credentials)
@@ -271,23 +277,8 @@ async def approve_user_callback(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-    welcome_text = (
-        "🎉 <b>Ваш доступ подтвержден!</b>\n\n"
-        "📌 Инструкция по проверке номеров и запросам:\n"
-        "Проверка номеров:\n"
-        "Отправляйте фото анкеты, номер телефона и юзернейм Telegram (@username).\n"
-        "На ваше сообщение будет поставлена реакция:\n"
-        "🏆 Кубок — плюсовой номер\n"
-        "💩 Говно — минусовой номер\n\n"
-        "Запросы на сайты:\n"
-        "В начале сообщения обязательно отмечайте ответственного: @damn2788, затем указывайте ваш стейдж и сам запрос.\n"
-        "Пример:\n"
-        "@damn2788\n"
-        "Buivol\n"
-        "2 вкз на телефон"
-    )
     try:
-        await bot.send_message(chat_id=target_user_id, text=welcome_text, parse_mode="HTML")
+        await bot.send_message(chat_id=target_user_id, text="🎉 <b>Ваш доступ подтвержден!</b>\n\n" + WELCOME_TEXT, parse_mode="HTML")
     except TelegramAPIError:
         pass
 
@@ -319,7 +310,7 @@ async def user_reply_in_pm(message: Message):
         return
 
     if not await is_user_approved(user_id):
-        await message.answer("🔒 Вы не авторизованы. Нажмите /start для авторизации.")
+        await message.answer("🔒 Вы не авторизованы. Перейдите по пригласительной ссылке.")
         return
 
     if message.text and message.text.startswith("/"):
@@ -379,7 +370,7 @@ async def anonymous_message(message: Message):
         return
 
     if not await is_user_approved(user_id):
-        await message.answer("🔒 Вы не авторизованы. Нажмите /start для авторизации.")
+        await message.answer("🔒 Вы не авторизованы. Перейдите по пригласительной ссылке.")
         return
 
     if message.text.startswith("/"):
@@ -423,7 +414,7 @@ async def anonymous_photo(message: Message):
         return
 
     if not await is_user_approved(user_id):
-        await message.answer("🔒 Вы не авторизованы. Нажмите /start для авторизации.")
+        await message.answer("🔒 Вы не авторизованы. Перейдите по пригласительной ссылке.")
         return
 
     user = message.from_user
@@ -548,7 +539,7 @@ async def group_reply_handler(message: Message):
         await message.reply("❌ Не удалось доставить ответ (пользователь заблокировал бота).")
 
 # -----------------------
-# Команда /who (работает в любой привязанной группе)
+# Команда /who
 # -----------------------
 
 @dp.message(Command("who"), F.chat.type.in_({"group", "supergroup"}))

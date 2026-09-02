@@ -17,7 +17,7 @@ from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ANON_CHAT_ID = -1003896678128
-ADMIN_ID = 123456789  # ⚠️ УКАЖИ ЗДЕСЬ СВОЙ TELEGRAM USER ID
+ADMIN_ID = 7710764694  # ⚠️ УКАЖИ ЗДЕСЬ СВОЙ TELEGRAM USER ID
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()

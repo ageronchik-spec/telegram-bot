@@ -97,7 +97,7 @@ async def get_user_group_id(user_id: int) -> int | None:
             return row[0] if row and row[0] else None
 
 async def bind_user_to_group(user_id: int, group_id: int, username: str = None, first_name: str = None, approved: bool = False):
-    """Привязывает пользователя к группе и опционально одобряет доступ."""
+    """Привязывает пользователя к группе."""
     async with aiosqlite.connect("anonymous.db") as db:
         await db.execute(
             """
@@ -105,7 +105,9 @@ async def bind_user_to_group(user_id: int, group_id: int, username: str = None, 
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET 
                 group_id = excluded.group_id,
-                is_approved = CASE WHEN excluded.is_approved = 1 THEN 1 ELSE users.is_approved END
+                username = excluded.username,
+                first_name = excluded.first_name,
+                is_approved = excluded.is_approved
             """,
             (user_id, username, first_name, group_id, 1 if approved else 0)
         )
@@ -147,7 +149,7 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
     user = message.from_user
     args = command.args
 
-    # 1. Переход по пригласительной ссылке — автоматическое одобрение без ручной проверки
+    # 1. Переход по пригласительной ссылке
     if args and args.startswith("group_"):
         try:
             target_group_id = int(args.replace("group_", ""))
@@ -174,17 +176,14 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
         await message.answer(WELCOME_TEXT)
         return
 
-    # 4. Если зашел вручную, но не по инвайт-ссылке — отправляем запрос админу
-    await state.set_state(AuthState.waiting_for_credentials)
+    # 4. Если зашел вручную и ещё не одобрен
     await message.answer(
-        "🔒 <b>Авторизация необходима!</b>\n\n"
-        "Пожалуйста, введите ваши данные для авторизации (например: ФИО, логин или стейдж), "
-        "чтобы администратор мог подтвердить ваш доступ.",
-        parse_mode="HTML"
+        "⏳ <b>Ваш запрос на привязку группы находится на рассмотрении у главного администратора.</b>\n"
+        "Ожидайте подтверждения доступа."
     )
 
 # -----------------------
-# Команда /admin (Привязка группы + Уведомление в ЛС главного админа)
+# Команда /admin (Запрос на добавление группы)
 # -----------------------
 
 @dp.message(Command("admin"), F.chat.type == "private")
@@ -219,90 +218,83 @@ async def process_group_id(message: Message, state: FSMContext):
 
     user = message.from_user
 
-    # Привязываем админа группы и сразу одобряем его
-    await bind_user_to_group(user.id, group_id, user.username, user.first_name, approved=True)
+    # Привязываем пользователя, но с is_approved=0 (без доступа до твоей проверки)
+    await bind_user_to_group(user.id, group_id, user.username, user.first_name, approved=False)
     await state.clear()
 
     bot_info = await bot.get_me()
     invite_link = f"https://t.me/{bot_info.username}?start=group_{group_id}"
 
-    # Отправляем ответ админу группы
+    # Отвечаем администратору группы
     await message.answer(
-        f"✅ <b>Группа «{chat.title}» успешно привязана!</b>\n\n"
-        f"🔗 <b>Пригласительная ссылка для сотрудников:</b>\n"
-        f"<code>{invite_link}</code>\n\n"
-        f"Перешлите эту ссылку вашим сотрудникам. Любой человек, перейдя по ней, сразу же получит доступ к боту без подтверждения!",
+        "⏳ <b>Запрос отправлен главному администратору!</b>\n\n"
+        f"Группа: <b>{chat.title}</b>\n"
+        "Как только главный администратор подтвердит заявку, вы получите доступ и пригласительную ссылку.",
         parse_mode="HTML"
     )
 
-    # 📩 Отправляем запрос / уведомление в ЛС вам (SUPER_ADMIN_ID)
+    # Формируем сообщение для тебя с кнопками
     username_str = f"@{user.username}" if user.username else "нет username"
     admin_notify_msg = (
-        "🔔 <b>Запрос / привязка новой группы через /admin!</b>\n\n"
+        "🔔 <b>Запрос на привязку новой группы через /admin!</b>\n\n"
         f"👤 <b>Администратор:</b> {user.first_name} ({username_str})\n"
         f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
         f"👥 <b>Группа:</b> {chat.title}\n"
         f"🆔 <b>Group ID:</b> <code>{group_id}</code>\n\n"
-        f"🔗 <b>Созданная инвайт-ссылка:</b>\n{invite_link}"
+        f"🔗 <b>Будущая инвайт-ссылка:</b>\n{invite_link}"
     )
 
+    confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_group_{user.id}_{group_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_group_{user.id}")
+        ]
+    ])
+
     try:
-        await bot.send_message(chat_id=SUPER_ADMIN_ID, text=admin_notify_msg, parse_mode="HTML")
+        await bot.send_message(chat_id=SUPER_ADMIN_ID, text=admin_notify_msg, reply_markup=confirm_kb, parse_mode="HTML")
     except Exception as e:
         print(f"Ошибка при отправке уведомления SUPER_ADMIN_ID: {e}")
 
 # -----------------------
-# Авторизация пользователя (ручной ввод)
+# Обработчики решений главного админа
 # -----------------------
 
-@dp.message(AuthState.waiting_for_credentials)
-async def process_credentials(message: Message, state: FSMContext):
-    user = message.from_user
-    credentials_text = message.text
+@dp.callback_query(F.data.startswith("approve_group_"))
+async def approve_group_callback(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    target_user_id = int(parts[2])
+    group_id = int(parts[3])
 
-    await state.clear()
-    await set_user_approval(user.id, False)
-
-    await message.answer("⌛ Ваши данные отправлены на проверку администратору. Ожидайте подтверждения.")
-
-    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{user.id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{user.id}")
-        ]
-    ])
-
-    username_str = f"@{user.username}" if user.username else "нет username"
-    admin_msg = (
-        "📥 <b>Новая заявка на авторизацию!</b>\n\n"
-        f"<b>Пользователь:</b> {user.first_name} ({username_str})\n"
-        f"<b>ID:</b> <code>{user.id}</code>\n"
-        f"<b>Введенные данные:</b>\n{credentials_text}"
-    )
-
-    try:
-        await bot.send_message(chat_id=SUPER_ADMIN_ID, text=admin_msg, reply_markup=admin_kb, parse_mode="HTML")
-    except Exception as e:
-        print(f"Ошибка отправки главному админу: {e}")
-
-@dp.callback_query(F.data.startswith("approve_"))
-async def approve_user_callback(callback: CallbackQuery):
-    target_user_id = int(callback.data.split("_")[1])
+    # Выдаём доступ администратору группы
     await set_user_approval(target_user_id, True)
 
     await callback.message.edit_text(
-        f"{callback.message.text}\n\n✅ <b>ДОСТУП ПОДТВЕРЖДЕН</b>",
+        f"{callback.message.text}\n\n✅ <b>ПРИВЯЗКА ГРУППЫ ОДОБРЕНА</b>",
         parse_mode="HTML"
     )
 
+    bot_info = await bot.get_me()
+    invite_link = f"https://t.me/{bot_info.username}?start=group_{group_id}"
+
+    # Отправляем инвайт-ссылку админу группы
     try:
-        await bot.send_message(chat_id=target_user_id, text="🎉 <b>Ваш доступ подтвержден!</b>\n\n" + WELCOME_TEXT, parse_mode="HTML")
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "🎉 <b>Ваша заявка на привязку группы одобрена!</b>\n\n"
+                f"🔗 <b>Пригласительная ссылка для участников:</b>\n"
+                f"<code>{invite_link}</code>\n\n"
+                "Перешлите эту ссылку сотрудникам — кликнув по ней, они сразу получат доступ к боту!"
+            ),
+            parse_mode="HTML"
+        )
     except TelegramAPIError:
         pass
 
-@dp.callback_query(F.data.startswith("reject_"))
-async def reject_user_callback(callback: CallbackQuery):
-    target_user_id = int(callback.data.split("_")[1])
+@dp.callback_query(F.data.startswith("reject_group_"))
+async def reject_group_callback(callback: CallbackQuery):
+    target_user_id = int(callback.data.split("_")[2])
 
     await callback.message.edit_text(
         f"{callback.message.text}\n\n❌ <b>ЗАЯВКА ОТКЛОНЕНА</b>",
@@ -310,7 +302,10 @@ async def reject_user_callback(callback: CallbackQuery):
     )
 
     try:
-        await bot.send_message(chat_id=target_user_id, text="❌ Ваша заявка на доступ была отклонена администратором.")
+        await bot.send_message(
+            chat_id=target_user_id,
+            text="❌ Ваша заявка на привязку группы была отклонена главным администратором."
+        )
     except TelegramAPIError:
         pass
 
@@ -328,7 +323,7 @@ async def user_reply_in_pm(message: Message):
         return
 
     if not await is_user_approved(user_id):
-        await message.answer("🔒 Вы не авторизованы. Перейдите по пригласительной ссылке.")
+        await message.answer("🔒 У вас нет доступа. Ожидайте подтверждения от главного администратора.")
         return
 
     if message.text and message.text.startswith("/"):
@@ -388,7 +383,7 @@ async def anonymous_message(message: Message):
         return
 
     if not await is_user_approved(user_id):
-        await message.answer("🔒 Вы не авторизованы. Перейдите по пригласительной ссылке.")
+        await message.answer("🔒 У вас нет доступа. Ожидайте подтверждения от главного администратора.")
         return
 
     if message.text.startswith("/"):
@@ -432,7 +427,7 @@ async def anonymous_photo(message: Message):
         return
 
     if not await is_user_approved(user_id):
-        await message.answer("🔒 Вы не авторизованы. Перейдите по пригласительной ссылке.")
+        await message.answer("🔒 У вас нет доступа. Ожидайте подтверждения от главного администратора.")
         return
 
     user = message.from_user

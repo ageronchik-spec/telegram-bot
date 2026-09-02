@@ -2,7 +2,7 @@ import asyncio
 import os
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -16,7 +16,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SUPER_ADMIN_ID = 7710764694  # ⚠️ Укажите ваш личный Telegram ID (Главный админ бота для авторизации)
+SUPER_ADMIN_ID = 7710764694  # ⚠️ Укажите ваш личный Telegram ID (Главный админ бота)
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -37,7 +37,6 @@ class AdminState(StatesGroup):
 
 async def init_db():
     async with aiosqlite.connect("anonymous.db") as db:
-        # Таблица сообщений (добавлена колонка group_id)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS anonymous_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +49,6 @@ async def init_db():
         )
         """)
 
-        # Таблица пользователей (привязанная группа + статус одобрения)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -61,7 +59,6 @@ async def init_db():
         )
         """)
 
-        # Миграция: добавляем group_id, если таблицы уже существовали
         try:
             await db.execute("ALTER TABLE anonymous_messages ADD COLUMN group_id INTEGER")
         except Exception:
@@ -78,21 +75,30 @@ async def init_db():
 # -----------------------
 
 async def get_user_group_id(user_id: int) -> int | None:
-    """Возвращает ID группы, привязанной к пользователю."""
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute("SELECT group_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return row[0] if row and row[0] else None
 
+async def bind_user_to_group(user_id: int, group_id: int, username: str = None, first_name: str = None):
+    async with aiosqlite.connect("anonymous.db") as db:
+        await db.execute(
+            """
+            INSERT INTO users (user_id, username, first_name, group_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET group_id = excluded.group_id
+            """,
+            (user_id, username, first_name, group_id)
+        )
+        await db.commit()
+
 async def is_user_approved(user_id: int) -> bool:
-    """Проверяет, авторизован ли пользователь."""
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute("SELECT is_approved FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return bool(row and row[0] == 1)
 
 async def set_user_approval(user_id: int, approved: bool):
-    """Обновляет статус авторизации пользователя."""
     async with aiosqlite.connect("anonymous.db") as db:
         await db.execute(
             """
@@ -104,7 +110,6 @@ async def set_user_approval(user_id: int, approved: bool):
         await db.commit()
 
 async def is_group_admin(chat_id: int, user_id: int) -> bool:
-    """Проверяет, является ли пользователь администратором в указанной группе."""
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return member.status in ("administrator", "creator")
@@ -112,28 +117,38 @@ async def is_group_admin(chat_id: int, user_id: int) -> bool:
         return False
 
 # -----------------------
-# Команда /start
+# Команда /start (с поддержкой пригласительных ссылок)
 # -----------------------
 
 @dp.message(CommandStart())
-async def start_handler(message: Message, state: FSMContext):
+async def start_handler(message: Message, command: CommandObject, state: FSMContext):
     if message.chat.type != "private":
         return
 
-    user_id = message.from_user.id
+    user = message.from_user
+    args = command.args  # Автоматический перехват параметрической ссылки (deep-linking)
 
-    # Проверка привязанной группы
-    group_id = await get_user_group_id(user_id)
+    # 1. Если пользователь пришел по пригласительной ссылке вида t.me/bot?start=group_XXXXX
+    if args and args.startswith("group_"):
+        try:
+            target_group_id = int(args.replace("group_", ""))
+            await bind_user_to_group(user.id, target_group_id, user.username, user.first_name)
+        except ValueError:
+            pass
+
+    # 2. Проверяем, привязан ли пользователь к какой-либо группе
+    group_id = await get_user_group_id(user.id)
     if not group_id:
         await message.answer(
-            "⚠️ <b>Группа не привязана!</b>\n\n"
-            "Сначала добавьте бота в вашу группу, сделайте его администратором и введите команду /admin, чтобы указать ID группы.",
+            "⚠️ <b>Вы не привязаны ни к одной группе!</b>\n\n"
+            "Попросите администратора вашей группы прислать вам специальную пригласительную ссылку для запуска бота.\n\n"
+            "<i>Если вы админ группы — введите /admin для настройки.</i>",
             parse_mode="HTML"
         )
         return
 
-    # Если пользователь авторизован — отправляем инструкцию
-    if await is_user_approved(user_id):
+    # 3. Если пользователь авторизован — показываем инструкцию
+    if await is_user_approved(user.id):
         welcome_text = (
             "📌 Инструкция по проверке номеров и запросам:\n"
             "Проверка номеров:\n"
@@ -151,7 +166,7 @@ async def start_handler(message: Message, state: FSMContext):
         await message.answer(welcome_text)
         return
 
-    # Запрос данных для авторизации
+    # 4. Если группа есть, но нет авторизации — просим ввести данные
     await state.set_state(AuthState.waiting_for_credentials)
     await message.answer(
         "🔒 <b>Авторизация необходима!</b>\n\n"
@@ -161,7 +176,7 @@ async def start_handler(message: Message, state: FSMContext):
     )
 
 # -----------------------
-# Команда /admin (Привязка группы)
+# Команда /admin (Привязка группы + генерация инвайт-ссылки)
 # -----------------------
 
 @dp.message(Command("admin"), F.chat.type == "private")
@@ -172,7 +187,7 @@ async def admin_command_handler(message: Message, state: FSMContext):
         "1. Добавьте бота в нужную группу.\n"
         "2. Выдайте боту права администратора.\n"
         "3. Введите здесь <b>ID группы</b> (начинается с минус-знака, например: <code>-1003896678128</code>).\n\n"
-        "💡 <i>Чтобы узнать ID группы, закройте с ботом диалог и перешлите сюда любое сообщение из вашей группы или используйте спец. ботов (@userinfobot).</i>",
+        "💡 <i>Чтобы узнать ID группы, перешлите сюда любое сообщение из вашей группы или используйте @userinfobot.</i>",
         parse_mode="HTML"
     )
 
@@ -181,44 +196,39 @@ async def process_group_id(message: Message, state: FSMContext):
     try:
         group_id = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Некорректный формат ID. Отправьте числовой ID группы (например, `-100123456789`).")
+        await message.answer("❌ Некорректный формат ID. Отправьте числовой ID группы.")
         return
 
-    # Проверяем, состоит ли бот в этой группе
     try:
         chat = await bot.get_chat(group_id)
     except Exception:
-        await message.answer("❌ Бот не найден в этой группе. Убедитесь, что вы добавили бота в группу и указали верный ID.")
+        await message.answer("❌ Бот не найден в этой группе.")
         return
 
-    # Проверяем, является ли отправитель админом в этой группе
     if not await is_group_admin(group_id, message.from_user.id):
-        await message.answer("❌ Вы не являетесь администратором или создателем этой группы!")
+        await message.answer("❌ Вы не являетесь администратором этой группы!")
         return
 
-    # Сохраняем привязку в базу данных
-    async with aiosqlite.connect("anonymous.db") as db:
-        await db.execute(
-            """
-            INSERT INTO users (user_id, username, first_name, group_id)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET group_id = excluded.group_id
-            """,
-            (message.from_user.id, message.from_user.username, message.from_user.first_name, group_id)
-        )
-        await db.commit()
-
+    # Сохраняем группу за админом
+    await bind_user_to_group(message.from_user.id, group_id, message.from_user.username, message.from_user.first_name)
     await state.clear()
+
+    # Формируем пригласительную ссылку для новых участников
+    bot_info = await bot.get_me()
+    # Заменяем минус на символ, если ID группы отрицательный
+    raw_group_id = str(group_id).replace("-", "")
+    invite_link = f"https://t.me/{bot_info.username}?start=group_{group_id}"
+
     await message.answer(
-        f"✅ <b>Группа успешно привязана!</b>\n\n"
-        f"Название группы: <b>{chat.title}</b>\n"
-        f"ID группы: <code>{group_id}</code>\n\n"
-        f"Теперь введите /start для продолжения.",
+        f"✅ <b>Группа «{chat.title}» успешно привязана!</b>\n\n"
+        f"🔗 <b>Пригласительная ссылка для сотрудников:</b>\n"
+        f"<code>{invite_link}</code>\n\n"
+        f"Перешлите эту ссылку вашим сотрудникам. Перейдя по ней, они автоматически привяжутся к этой группе и смогут сразу пройти авторизацию без настройки ID!",
         parse_mode="HTML"
     )
 
 # -----------------------
-# Обработка авторизации
+# Авторизация пользователя
 # -----------------------
 
 @dp.message(AuthState.waiting_for_credentials)
@@ -305,7 +315,7 @@ async def user_reply_in_pm(message: Message):
     group_id = await get_user_group_id(user_id)
 
     if not group_id:
-        await message.answer("⚠️ Ваша группа не настроена. Введите /admin для настройки.")
+        await message.answer("⚠️ Вы не привязаны к группе. Перейдите по пригласительной ссылке от вашего админа.")
         return
 
     if not await is_user_approved(user_id):
@@ -365,7 +375,7 @@ async def anonymous_message(message: Message):
     group_id = await get_user_group_id(user_id)
 
     if not group_id:
-        await message.answer("⚠️ Ваша группа не настроена. Введите /admin для настройки.")
+        await message.answer("⚠️ Вы не привязаны к группе. Перейдите по пригласительной ссылке от вашего админа.")
         return
 
     if not await is_user_approved(user_id):
@@ -409,7 +419,7 @@ async def anonymous_photo(message: Message):
     group_id = await get_user_group_id(user_id)
 
     if not group_id:
-        await message.answer("⚠️ Ваша группа не настроена. Введите /admin для настройки.")
+        await message.answer("⚠️ Вы не привязаны к группе. Перейдите по пригласительной ссылке от вашего админа.")
         return
 
     if not await is_user_approved(user_id):

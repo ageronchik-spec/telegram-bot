@@ -1,4 +1,5 @@
 import asyncio
+import html
 import os
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
@@ -91,10 +92,11 @@ async def init_db():
 # -----------------------
 
 def get_user_mention(user) -> str:
-    """Возвращает юзернейм с собачкой или имя со ссылкой."""
+    """Безопасное формирование упоминания пользователя в формате HTML."""
     if user.username:
-        return f"@{user.username}"
-    return f"[{user.first_name}](tg://user?id={user.id})"
+        return f"@{html.escape(user.username)}"
+    safe_name = html.escape(user.first_name or "Пользователь")
+    return f'<a href="tg://user?id={user.id}">{safe_name}</a>'
 
 async def get_user_group_id(user_id: int) -> int | None:
     async with aiosqlite.connect("anonymous.db") as db:
@@ -234,18 +236,18 @@ async def process_group_id(message: Message, state: FSMContext):
     # Отвечаем администратору группы
     await message.answer(
         "⏳ <b>Запрос отправлен главному администратору!</b>\n\n"
-        f"Группа: <b>{chat.title}</b>\n"
+        f"Группа: <b>{html.escape(chat.title)}</b>\n"
         "Как только главный администратор подтвердит заявку, вы получите доступ и пригласительную ссылку.",
         parse_mode="HTML"
     )
 
     # Формируем сообщение для тебя с кнопками
-    username_str = f"@{user.username}" if user.username else "нет username"
+    username_str = f"@{html.escape(user.username)}" if user.username else "нет username"
     admin_notify_msg = (
         "🔔 <b>Запрос на привязку новой группы через /admin!</b>\n\n"
-        f"👤 <b>Администратор:</b> {user.first_name} ({username_str})\n"
+        f"👤 <b>Администратор:</b> {html.escape(user.first_name or '')} ({username_str})\n"
         f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
-        f"👥 <b>Группа:</b> {chat.title}\n"
+        f"👥 <b>Группа:</b> {html.escape(chat.title)}\n"
         f"🆔 <b>Group ID:</b> <code>{group_id}</code>\n\n"
         f"🔗 <b>Будущая инвайт-ссылка:</b>\n{invite_link}"
     )
@@ -353,9 +355,10 @@ async def user_reply_in_pm(message: Message):
 
     try:
         if message.photo:
+            raw_caption = message.caption or ""
             caption_text = f"🥷 Аноним #{anonymous_id}"
-            if message.caption:
-                caption_text += f"\n\n{message.caption}"
+            if raw_caption:
+                caption_text += f"\n\n{html.escape(raw_caption)}"
             caption_text += f"\n\n👤 {user_mention}"
 
             await bot.send_photo(
@@ -363,15 +366,15 @@ async def user_reply_in_pm(message: Message):
                 photo=message.photo[-1].file_id,
                 caption=caption_text,
                 reply_to_message_id=group_msg_id,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         elif message.text:
-            text_to_send = f"🥷 Аноним #{anonymous_id}\n\n{message.text}\n\n👤 {user_mention}"
+            text_to_send = f"🥷 Аноним #{anonymous_id}\n\n{html.escape(message.text)}\n\n👤 {user_mention}"
             await bot.send_message(
                 chat_id=group_id,
                 text=text_to_send,
                 reply_to_message_id=group_msg_id,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         else:
             await message.copy_message(
@@ -415,12 +418,12 @@ async def anonymous_message(message: Message):
         await db.commit()
         anonymous_id = cursor.lastrowid
 
-        text_to_send = f"🥷 Аноним #{anonymous_id}\n\n{message.text}\n\n👤 {user_mention}"
+        text_to_send = f"🥷 Аноним #{anonymous_id}\n\n{html.escape(message.text)}\n\n👤 {user_mention}"
 
         sent_message = await bot.send_message(
             chat_id=group_id,
             text=text_to_send,
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
         await db.execute(
@@ -462,14 +465,14 @@ async def anonymous_photo(message: Message):
 
         caption_text = f"🥷 Аноним #{anonymous_id}"
         if message.caption:
-            caption_text += f"\n\n{message.caption}"
+            caption_text += f"\n\n{html.escape(message.caption)}"
         caption_text += f"\n\n👤 {user_mention}"
 
         sent_message = await bot.send_photo(
             chat_id=group_id,
             photo=message.photo[-1].file_id,
             caption=caption_text,
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
         await db.execute(
@@ -599,15 +602,15 @@ async def who_handler(message: Message):
         return
 
     user_id, username, first_name = result
-    username_text = f"@{username}" if username else "нет username"
+    username_text = f"@{html.escape(username)}" if username else "нет username"
 
     await message.reply(
-        "🔐 Информация об авторе\n\n"
+        "🔐 <b>Информация об авторе</b>\n\n"
         f"Аноним: #{anonymous_id}\n"
-        f"Имя: {first_name}\n"
+        f"Имя: {html.escape(first_name or '')}\n"
         f"Username: {username_text}\n"
-        f"User ID: `{user_id}`",
-        parse_mode="Markdown"
+        f"User ID: <code>{user_id}</code>",
+        parse_mode="HTML"
     )
 
 # -----------------------

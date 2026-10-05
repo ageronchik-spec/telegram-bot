@@ -16,7 +16,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SUPER_ADMIN_ID = 7710764694  # ⚠️ Твой личный Telegram ID
+SUPER_ADMIN_ID = 123456789  # ⚠️ Твой личный Telegram ID
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -89,6 +89,12 @@ async def init_db():
 # -----------------------
 # Вспомогательные функции
 # -----------------------
+
+def get_user_mention(user) -> str:
+    """Возвращает юзернейм с собачкой или имя со ссылкой."""
+    if user.username:
+        return f"@{user.username}"
+    return f"[{user.first_name}](tg://user?id={user.id})"
 
 async def get_user_group_id(user_id: int) -> int | None:
     async with aiosqlite.connect("anonymous.db") as db:
@@ -343,23 +349,29 @@ async def user_reply_in_pm(message: Message):
         return
 
     anonymous_id, group_msg_id = result
+    user_mention = get_user_mention(message.from_user)
 
     try:
         if message.photo:
             caption_text = f"🥷 Аноним #{anonymous_id}"
             if message.caption:
                 caption_text += f"\n\n{message.caption}"
+            caption_text += f"\n\n👤 {user_mention}"
+
             await bot.send_photo(
                 chat_id=group_id,
                 photo=message.photo[-1].file_id,
                 caption=caption_text,
-                reply_to_message_id=group_msg_id
+                reply_to_message_id=group_msg_id,
+                parse_mode="Markdown"
             )
         elif message.text:
+            text_to_send = f"🥷 Аноним #{anonymous_id}\n\n{message.text}\n\n👤 {user_mention}"
             await bot.send_message(
                 chat_id=group_id,
-                text=f"🥷 Аноним #{anonymous_id}\n\n{message.text}",
-                reply_to_message_id=group_msg_id
+                text=text_to_send,
+                reply_to_message_id=group_msg_id,
+                parse_mode="Markdown"
             )
         else:
             await message.copy_message(
@@ -390,6 +402,7 @@ async def anonymous_message(message: Message):
         return
 
     user = message.from_user
+    user_mention = get_user_mention(user)
 
     async with aiosqlite.connect("anonymous.db") as db:
         cursor = await db.execute(
@@ -402,9 +415,12 @@ async def anonymous_message(message: Message):
         await db.commit()
         anonymous_id = cursor.lastrowid
 
+        text_to_send = f"🥷 Аноним #{anonymous_id}\n\n{message.text}\n\n👤 {user_mention}"
+
         sent_message = await bot.send_message(
             chat_id=group_id,
-            text=f"🥷 Аноним #{anonymous_id}\n\n{message.text}"
+            text=text_to_send,
+            parse_mode="Markdown"
         )
 
         await db.execute(
@@ -431,6 +447,7 @@ async def anonymous_photo(message: Message):
         return
 
     user = message.from_user
+    user_mention = get_user_mention(user)
 
     async with aiosqlite.connect("anonymous.db") as db:
         cursor = await db.execute(
@@ -446,11 +463,13 @@ async def anonymous_photo(message: Message):
         caption_text = f"🥷 Аноним #{anonymous_id}"
         if message.caption:
             caption_text += f"\n\n{message.caption}"
+        caption_text += f"\n\n👤 {user_mention}"
 
         sent_message = await bot.send_photo(
             chat_id=group_id,
             photo=message.photo[-1].file_id,
-            caption=caption_text
+            caption=caption_text,
+            parse_mode="Markdown"
         )
 
         await db.execute(
@@ -552,15 +571,11 @@ async def group_reply_handler(message: Message):
         await message.reply("❌ Не удалось доставить ответ (пользователь заблокировал бота).")
 
 # -----------------------
-# Команда /who
+# Команда /who (Доступна ВСЕМ в группе)
 # -----------------------
 
 @dp.message(Command("who"), F.chat.type.in_({"group", "supergroup"}))
 async def who_handler(message: Message):
-    if not await is_group_admin(message.chat.id, message.from_user.id):
-        await message.reply("❌ Эта команда доступна только администраторам.")
-        return
-
     parts = message.text.split()
     if len(parts) != 2:
         await message.reply("Использование:\n/who 15")

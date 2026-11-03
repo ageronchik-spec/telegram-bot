@@ -19,7 +19,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SUPER_ADMIN_ID = 123456789  # ⚠️ Укажите свой Telegram ID
+SUPER_ADMIN_ID = 7710764694  # ⚠️ Укажите свой Telegram ID
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()

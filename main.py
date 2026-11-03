@@ -19,24 +19,13 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SUPER_ADMIN_ID = 7710764694  # ⚠️ Укажите свой Telegram ID
+SUPER_ADMIN_ID = 123456789  # ⚠️ Укажите свой Telegram ID
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 WELCOME_TEXT = (
-    "📌 Инструкция по проверке номеров и запросам:\n"
-    "Проверка номеров:\n"
-    "Отправляйте фото анкеты, номер телефона и юзернейм Telegram (@username).\n"
-    "На ваше сообщение будет поставлена реакция:\n"
-    "🏆 Кубок — плюсовой номер\n"
-    "💩 Говно — минусовой номер\n\n"
-    "Запросы на сайты:\n"
-    "В начале сообщения обязательно отмечайте ответственного: @damn2788, затем указывайте ваш стейдж и сам запрос.\n"
-    "Пример:\n"
-    "@damn2788\n"
-    "Buivol\n"
-    "2 вкз на телефон"
+    "📌 Welcome to SPM\n"
 )
 
 # -----------------------
@@ -123,7 +112,7 @@ async def get_user_data(user_id: int):
 
 async def bind_user_to_group(user_id: int, group_id: int, username: str = None, first_name: str = None, approved: bool = False):
     async with aiosqlite.connect("anonymous.db") as db:
-        async with db.execute(
+        await db.execute(
             """
             INSERT INTO users (user_id, username, first_name, group_id, is_approved)
             VALUES (?, ?, ?, ?, ?)
@@ -144,7 +133,7 @@ async def update_user_selected_thread(user_id: int, thread_id: int):
 
 async def set_user_approval(user_id: int, approved: bool):
     async with aiosqlite.connect("anonymous.db") as db:
-        async with db.execute(
+        await db.execute(
             """
             INSERT INTO users (user_id, is_approved) VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET is_approved = excluded.is_approved
@@ -278,7 +267,6 @@ async def process_thread_id(message: Message, state: FSMContext):
 
 @dp.message(Command("delthread"), F.chat.type == "private")
 async def delete_thread_command(message: Message):
-    """Показывает список кнопок для удаления"""
     user_id = message.from_user.id
     group_id, _, _ = await get_user_data(user_id)
 
@@ -311,24 +299,19 @@ async def process_delete_thread(callback: CallbackQuery):
     group_id, _, _ = await get_user_data(user_id)
 
     async with aiosqlite.connect("anonymous.db") as db:
-        # Узнаем имя для отчета
         async with db.execute("SELECT thread_name FROM group_threads WHERE id = ?", (row_id,)) as cursor:
             row = await cursor.fetchone()
             thread_name = row[0] if row else "Кнопка"
 
-        # Удаляем из базы
         await db.execute("DELETE FROM group_threads WHERE id = ?", (row_id,))
         await db.commit()
 
-    # Обновляем инлайн-сообщение
     await callback.message.edit_text(f"✅ Кнопка «<b>{thread_name}</b>» успешно удалена!", parse_mode="HTML")
 
-    # Обновляем менеджеру постоянную клавиатуру внизу
     kb = await get_reply_threads_keyboard(group_id)
     if kb:
         await bot.send_message(user_id, "🔄 Клавиатура обновлена:", reply_markup=kb)
     else:
-        # Если кнопок не осталось вообще, убираем reply-клавиатуру
         from aiogram.types import ReplyKeyboardRemove
         await bot.send_message(user_id, "🔄 Все кнопки удалены.", reply_markup=ReplyKeyboardRemove())
 
@@ -431,7 +414,7 @@ async def reject_group_callback(callback: CallbackQuery):
         pass
 
 # ----------------------------------------------------
-# Перехват клика по постоянным кнопкам веток
+# Обработка сообщений и переключения кнопок
 # ----------------------------------------------------
 
 @dp.message(F.chat.type == "private", F.text)
@@ -456,10 +439,6 @@ async def check_thread_switch_or_send(message: Message):
         return
 
     await anonymous_message(message)
-
-# ----------------------------------------------------
-# Отправка первично создаваемого ТЕКСТА в ветку
-# ----------------------------------------------------
 
 async def anonymous_message(message: Message):
     user_id = message.from_user.id
@@ -508,10 +487,6 @@ async def anonymous_message(message: Message):
             (sent_message.message_id, anonymous_id)
         )
         await db.commit()
-
-# ----------------------------------------------------
-# Отправка первично создаваемой ФОТОГРАФИИ в ветку
-# ----------------------------------------------------
 
 @dp.message(F.chat.type == "private", F.photo)
 async def anonymous_photo(message: Message):
@@ -564,10 +539,6 @@ async def anonymous_photo(message: Message):
         )
         await db.commit()
 
-# ----------------------------------------------------
-# Пересылка ответа администратора из группы менеджеру в ЛС
-# ----------------------------------------------------
-
 @dp.message(F.chat.type.in_({"group", "supergroup"}), F.reply_to_message)
 async def group_reply_handler(message: Message):
     if message.text and message.text.startswith("/"):
@@ -604,16 +575,12 @@ async def group_reply_handler(message: Message):
                 reply_to_message_id=user_msg_id
             )
         else:
-            await message.copy_message(
+            await bot.copy_message(
                 chat_id=target_user_id,
                 reply_to_message_id=user_msg_id
             )
     except TelegramAPIError:
         await message.reply("❌ Не удалось доставить ответ (пользователь заблокировал бота).")
-
-# ----------------------------------------------------
-# Команда /who
-# ----------------------------------------------------
 
 @dp.message(Command("who"), F.chat.type.in_({"group", "supergroup"}))
 async def who_handler(message: Message):

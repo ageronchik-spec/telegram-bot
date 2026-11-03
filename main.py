@@ -109,13 +109,13 @@ async def init_db():
 # -----------------------
 
 def get_user_mention(user) -> str:
-    """Создает полноценное кликабельное упоминание с реальным пингом в Telegram"""
-    name = f"@{user.username}" if user.username else (user.first_name or "Пользователь")
-    safe_name = html.escape(name)
+    """Гарантированный пинг: если есть username, отдаем @username (Telegram сам его подсветит и пингнет). Если нет — ссылку по ID."""
+    if user.username:
+        return f"@{html.escape(user.username)}"
+    safe_name = html.escape(user.first_name or "Пользователь")
     return f'<a href="tg://user?id={user.id}">{safe_name}</a>'
 
 async def get_user_data(user_id: int):
-    """Возвращает (group_id, selected_thread_id, is_approved)"""
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute("SELECT group_id, selected_thread_id, is_approved FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()

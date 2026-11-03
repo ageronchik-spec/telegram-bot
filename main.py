@@ -109,9 +109,9 @@ async def init_db():
 # -----------------------
 
 def get_user_mention(user) -> str:
-    """Создает кликабельное упоминание (с пингом/уведомлением)"""
-    username_text = f"@{user.username}" if user.username else (user.first_name or "Пользователь")
-    safe_name = html.escape(username_text)
+    """Создает полноценное кликабельное упоминание с реальным пингом в Telegram"""
+    name = f"@{user.username}" if user.username else (user.first_name or "Пользователь")
+    safe_name = html.escape(name)
     return f'<a href="tg://user?id={user.id}">{safe_name}</a>'
 
 async def get_user_data(user_id: int):
@@ -140,7 +140,6 @@ async def bind_user_to_group(user_id: int, group_id: int, username: str = None, 
         await db.commit()
 
 async def update_user_selected_thread(user_id: int, thread_id: int):
-    """Сохраняет выбранную ветку прямо в профиль пользователя в БД"""
     async with aiosqlite.connect("anonymous.db") as db:
         await db.execute("UPDATE users SET selected_thread_id = ? WHERE user_id = ?", (thread_id, user_id))
         await db.commit()
@@ -175,7 +174,6 @@ async def get_reply_threads_keyboard(group_id: int) -> ReplyKeyboardMarkup | Non
     if not rows:
         return None
 
-    # Делаем кнопки внизу чата
     keyboard = []
     for row in rows:
         keyboard.append([KeyboardButton(text=row[0])])
@@ -391,7 +389,6 @@ async def check_thread_switch(message: Message):
     if not group_id or not is_approved:
         return
 
-    # Проверяем, совпадает ли текст сообщения с какой-либо кнопкой ветки
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute(
             "SELECT thread_id, thread_name FROM group_threads WHERE group_id = ? AND thread_name = ?",
@@ -402,10 +399,9 @@ async def check_thread_switch(message: Message):
     if thread_row:
         new_thread_id, thread_name = thread_row
         await update_user_selected_thread(user_id, new_thread_id)
-        await message.answer(f"📌 **Вы переключились на ветку:** {html.escape(thread_name)}\nТеперь все отправляемые сообщения улетают туда.", parse_mode="HTML")
+        await message.answer(f"📌 <b>Вы переключились на ветку:</b> {html.escape(thread_name)}\nТеперь все отправляемые сообщения улетают туда.", parse_mode="HTML")
         return
 
-    # Если это обычный текст — отправляем в выбранную ветку
     await anonymous_message(message)
 
 # ----------------------------------------------------
@@ -445,7 +441,6 @@ async def anonymous_message(message: Message):
         await db.commit()
         anonymous_id = cursor.lastrowid
 
-        # Формируем текст с ПИНГОМ/УВЕДОМЛЕНИЕМ через get_user_mention()
         text_to_send = f"🥷 Аноним #{anonymous_id}\n\n{html.escape(message.text)}\n\n👤 {user_mention}"
 
         sent_message = await bot.send_message(

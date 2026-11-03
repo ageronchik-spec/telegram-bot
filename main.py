@@ -25,7 +25,18 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 WELCOME_TEXT = (
-    "📌 Welcome to SPAM\n"
+    "📌 Инструкция по проверке номеров и запросам:\n"
+    "Проверка номеров:\n"
+    "Отправляйте фото анкеты, номер телефона и юзернейм Telegram (@username).\n"
+    "На ваше сообщение будет поставлена реакция:\n"
+    "🏆 Кубок — плюсовой номер\n"
+    "💩 Говно — минусовой номер\n\n"
+    "Запросы на сайты:\n"
+    "В начале сообщения обязательно отмечайте ответственного: @damn2788, затем указывайте ваш стейдж и сам запрос.\n"
+    "Пример:\n"
+    "@damn2788\n"
+    "Buivol\n"
+    "2 вкз на телефон"
 )
 
 # -----------------------
@@ -98,7 +109,6 @@ async def init_db():
 # -----------------------
 
 def get_user_mention(user) -> str:
-    """Формирует упоминание с гарантированным системным пингом"""
     name = f"@{user.username}" if user.username else (user.first_name or "Пользователь")
     safe_name = html.escape(name)
     return f'<a href="tg://user?id={user.id}">{safe_name}</a>'
@@ -113,7 +123,7 @@ async def get_user_data(user_id: int):
 
 async def bind_user_to_group(user_id: int, group_id: int, username: str = None, first_name: str = None, approved: bool = False):
     async with aiosqlite.connect("anonymous.db") as db:
-        await db.execute(
+        async with db.execute(
             """
             INSERT INTO users (user_id, username, first_name, group_id, is_approved)
             VALUES (?, ?, ?, ?, ?)
@@ -134,7 +144,7 @@ async def update_user_selected_thread(user_id: int, thread_id: int):
 
 async def set_user_approval(user_id: int, approved: bool):
     async with aiosqlite.connect("anonymous.db") as db:
-        await db.execute(
+        async with db.execute(
             """
             INSERT INTO users (user_id, is_approved) VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET is_approved = excluded.is_approved
@@ -213,7 +223,7 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
         await message.answer(WELCOME_TEXT)
 
 # -----------------------
-# Управление ветками (/addthread)
+# Управление ветками (/addthread и /delthread)
 # -----------------------
 
 @dp.message(Command("addthread"), F.chat.type == "private")
@@ -265,6 +275,64 @@ async def process_thread_id(message: Message, state: FSMContext):
         reply_markup=kb,
         parse_mode="HTML"
     )
+
+@dp.message(Command("delthread"), F.chat.type == "private")
+async def delete_thread_command(message: Message):
+    """Показывает список кнопок для удаления"""
+    user_id = message.from_user.id
+    group_id, _, _ = await get_user_data(user_id)
+
+    if not group_id:
+        await message.answer("⚠️ Сначала привяжите группу через /admin.")
+        return
+
+    async with aiosqlite.connect("anonymous.db") as db:
+        async with db.execute("SELECT id, thread_name FROM group_threads WHERE group_id = ?", (group_id,)) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        await message.answer("⚠️ В вашей группе пока нет созданных кнопок.")
+        return
+
+    keyboard = []
+    for row_id, name in rows:
+        keyboard.append([InlineKeyboardButton(text=f"❌ Удалить: {name}", callback_data=f"del_th_{row_id}")])
+
+    await message.answer(
+        "🗑 <b>Управление кнопками</b>\n\nВыберите кнопку, которую хотите удалить:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(F.data.startswith("del_th_"))
+async def process_delete_thread(callback: CallbackQuery):
+    row_id = int(callback.data.replace("del_th_", ""))
+    user_id = callback.from_user.id
+    group_id, _, _ = await get_user_data(user_id)
+
+    async with aiosqlite.connect("anonymous.db") as db:
+        # Узнаем имя для отчета
+        async with db.execute("SELECT thread_name FROM group_threads WHERE id = ?", (row_id,)) as cursor:
+            row = await cursor.fetchone()
+            thread_name = row[0] if row else "Кнопка"
+
+        # Удаляем из базы
+        await db.execute("DELETE FROM group_threads WHERE id = ?", (row_id,))
+        await db.commit()
+
+    # Обновляем инлайн-сообщение
+    await callback.message.edit_text(f"✅ Кнопка «<b>{thread_name}</b>» успешно удалена!", parse_mode="HTML")
+
+    # Обновляем менеджеру постоянную клавиатуру внизу
+    kb = await get_reply_threads_keyboard(group_id)
+    if kb:
+        await bot.send_message(user_id, "🔄 Клавиатура обновлена:", reply_markup=kb)
+    else:
+        # Если кнопок не осталось вообще, убираем reply-клавиатуру
+        from aiogram.types import ReplyKeyboardRemove
+        await bot.send_message(user_id, "🔄 Все кнопки удалены.", reply_markup=ReplyKeyboardRemove())
+
+    await callback.answer()
 
 # -----------------------
 # Команда /admin
@@ -345,7 +413,8 @@ async def approve_group_callback(callback: CallbackQuery):
             text=(
                 "🎉 <b>Заявка одобрена!</b>\n\n"
                 f"🔗 <b>Инвайт-ссылка для сотрудников:</b>\n<code>{invite_link}</code>\n\n"
-                "⚙️ Чтобы добавить постоянные кнопки веток, введите команду /addthread"
+                "⚙️ Добавить кнопки: /addthread\n"
+                "🗑 Удалить кнопки: /delthread"
             ),
             parse_mode="HTML"
         )
@@ -362,70 +431,17 @@ async def reject_group_callback(callback: CallbackQuery):
         pass
 
 # ----------------------------------------------------
-# Фильтр и обработка переключения веток / отправки сообщений
+# Перехват клика по постоянным кнопкам веток
 # ----------------------------------------------------
-
-@dp.message(F.chat.type == "private", F.reply_to_message)
-async def user_reply_in_pm(message: Message):
-    """Ответ менеджера на сообщение администратора в ЛС с цитированием (Reply)"""
-    user_id = message.from_user.id
-    group_id, _, is_approved = await get_user_data(user_id)
-
-    if not group_id or not is_approved:
-        return
-
-    if message.text and message.text.startswith("/"):
-        return
-
-    replied_user_msg_id = message.reply_to_message.message_id
-
-    async with aiosqlite.connect("anonymous.db") as db:
-        async with db.execute(
-            "SELECT id, thread_id, telegram_message_id FROM anonymous_messages WHERE user_message_id = ?",
-            (replied_user_msg_id,)
-        ) as cursor:
-            result = await cursor.fetchone()
-
-    if not result:
-        await anonymous_message(message)
-        return
-
-    anonymous_id, thread_id, group_msg_id = result
-
-    try:
-        if message.photo:
-            raw_caption = message.caption or ""
-            caption_text = raw_caption if raw_caption else ""
-
-            await bot.send_photo(
-                chat_id=group_id,
-                message_thread_id=thread_id,
-                photo=message.photo[-1].file_id,
-                caption=caption_text,
-                reply_to_message_id=group_msg_id,  # 👈 Ответ с синей плашкой в группе!
-                parse_mode="HTML"
-            )
-        elif message.text:
-            await bot.send_message(
-                chat_id=group_id,
-                message_thread_id=thread_id,
-                text=message.text,
-                reply_to_message_id=group_msg_id,  # 👈 Ответ с синей плашкой в группе!
-                parse_mode="HTML"
-            )
-    except TelegramAPIError as e:
-        await message.answer(f"❌ Ошибка отправки в группу: {e}")
 
 @dp.message(F.chat.type == "private", F.text)
 async def check_thread_switch_or_send(message: Message):
-    """Проверка нажатия кнопки ветки или отправка нового сообщения"""
     user_id = message.from_user.id
     group_id, selected_thread_id, is_approved = await get_user_data(user_id)
 
     if not group_id or not is_approved:
         return
 
-    # Проверяем, совпадает ли текст сообщения с названием какой-либо кнопки
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute(
             "SELECT thread_id, thread_name FROM group_threads WHERE group_id = ? AND thread_name = ?",

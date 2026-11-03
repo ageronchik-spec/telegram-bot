@@ -19,24 +19,13 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SUPER_ADMIN_ID = 7710764694  # ⚠️ Укажи здесь свой Telegram ID
+SUPER_ADMIN_ID = 7710764694  # ⚠️ Укажите свой Telegram ID
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 WELCOME_TEXT = (
-    "📌 Инструкция по проверке номеров и запросам:\n"
-    "Проверка номеров:\n"
-    "Отправляйте фото анкеты, номер телефона и юзернейм Telegram (@username).\n"
-    "На ваше сообщение будет поставлена реакция:\n"
-    "🏆 Кубок — плюсовой номер\n"
-    "💩 Говно — минусовой номер\n\n"
-    "Запросы на сайты:\n"
-    "В начале сообщения обязательно отмечайте ответственного: @damn2788, затем указывайте ваш стейдж и сам запрос.\n"
-    "Пример:\n"
-    "@damn2788\n"
-    "Buivol\n"
-    "2 вкз на телефон"
+    "📌 Welcome to SPAM\n"
 )
 
 # -----------------------
@@ -109,10 +98,9 @@ async def init_db():
 # -----------------------
 
 def get_user_mention(user) -> str:
-    """Гарантированный пинг: если есть username, отдаем @username (Telegram сам его подсветит и пингнет). Если нет — ссылку по ID."""
-    if user.username:
-        return f"@{html.escape(user.username)}"
-    safe_name = html.escape(user.first_name or "Пользователь")
+    """Формирует упоминание с гарантированным системным пингом"""
+    name = f"@{user.username}" if user.username else (user.first_name or "Пользователь")
+    safe_name = html.escape(name)
     return f'<a href="tg://user?id={user.id}">{safe_name}</a>'
 
 async def get_user_data(user_id: int):
@@ -161,10 +149,6 @@ async def is_group_admin(chat_id: int, user_id: int) -> bool:
         return member.status in ("administrator", "creator")
     except Exception:
         return False
-
-# -----------------------
-# Функция генерации ПОСТОЯННОЙ Reply-клавиатуры
-# -----------------------
 
 async def get_reply_threads_keyboard(group_id: int) -> ReplyKeyboardMarkup | None:
     async with aiosqlite.connect("anonymous.db") as db:
@@ -378,17 +362,70 @@ async def reject_group_callback(callback: CallbackQuery):
         pass
 
 # ----------------------------------------------------
-# Перехват клика по постоянным кнопкам веток
+# Фильтр и обработка переключения веток / отправки сообщений
 # ----------------------------------------------------
 
+@dp.message(F.chat.type == "private", F.reply_to_message)
+async def user_reply_in_pm(message: Message):
+    """Ответ менеджера на сообщение администратора в ЛС с цитированием (Reply)"""
+    user_id = message.from_user.id
+    group_id, _, is_approved = await get_user_data(user_id)
+
+    if not group_id or not is_approved:
+        return
+
+    if message.text and message.text.startswith("/"):
+        return
+
+    replied_user_msg_id = message.reply_to_message.message_id
+
+    async with aiosqlite.connect("anonymous.db") as db:
+        async with db.execute(
+            "SELECT id, thread_id, telegram_message_id FROM anonymous_messages WHERE user_message_id = ?",
+            (replied_user_msg_id,)
+        ) as cursor:
+            result = await cursor.fetchone()
+
+    if not result:
+        await anonymous_message(message)
+        return
+
+    anonymous_id, thread_id, group_msg_id = result
+
+    try:
+        if message.photo:
+            raw_caption = message.caption or ""
+            caption_text = raw_caption if raw_caption else ""
+
+            await bot.send_photo(
+                chat_id=group_id,
+                message_thread_id=thread_id,
+                photo=message.photo[-1].file_id,
+                caption=caption_text,
+                reply_to_message_id=group_msg_id,  # 👈 Ответ с синей плашкой в группе!
+                parse_mode="HTML"
+            )
+        elif message.text:
+            await bot.send_message(
+                chat_id=group_id,
+                message_thread_id=thread_id,
+                text=message.text,
+                reply_to_message_id=group_msg_id,  # 👈 Ответ с синей плашкой в группе!
+                parse_mode="HTML"
+            )
+    except TelegramAPIError as e:
+        await message.answer(f"❌ Ошибка отправки в группу: {e}")
+
 @dp.message(F.chat.type == "private", F.text)
-async def check_thread_switch(message: Message):
+async def check_thread_switch_or_send(message: Message):
+    """Проверка нажатия кнопки ветки или отправка нового сообщения"""
     user_id = message.from_user.id
     group_id, selected_thread_id, is_approved = await get_user_data(user_id)
 
     if not group_id or not is_approved:
         return
 
+    # Проверяем, совпадает ли текст сообщения с названием какой-либо кнопки
     async with aiosqlite.connect("anonymous.db") as db:
         async with db.execute(
             "SELECT thread_id, thread_name FROM group_threads WHERE group_id = ? AND thread_name = ?",
@@ -399,13 +436,13 @@ async def check_thread_switch(message: Message):
     if thread_row:
         new_thread_id, thread_name = thread_row
         await update_user_selected_thread(user_id, new_thread_id)
-        await message.answer(f"📌 <b>Вы переключились на ветку:</b> {html.escape(thread_name)}\nТеперь все отправляемые сообщения улетают туда.", parse_mode="HTML")
+        await message.answer(f"📌 <b>Вы переключились на ветку:</b> {html.escape(thread_name)}\nТеперь все новые сообщения улетают туда.", parse_mode="HTML")
         return
 
     await anonymous_message(message)
 
 # ----------------------------------------------------
-# Отправка ТЕКСТА в выбранную ветку
+# Отправка первично создаваемого ТЕКСТА в ветку
 # ----------------------------------------------------
 
 async def anonymous_message(message: Message):
@@ -416,7 +453,7 @@ async def anonymous_message(message: Message):
         await message.answer("⚠️ Нет доступа или группа не привязана.")
         return
 
-    if message.text.startswith("/"):
+    if message.text and message.text.startswith("/"):
         return
 
     if not thread_id:
@@ -457,7 +494,7 @@ async def anonymous_message(message: Message):
         await db.commit()
 
 # ----------------------------------------------------
-# Отправка ФОТОГРАФИЙ в выбранную ветку
+# Отправка первично создаваемой ФОТОГРАФИИ в ветку
 # ----------------------------------------------------
 
 @dp.message(F.chat.type == "private", F.photo)
@@ -512,65 +549,7 @@ async def anonymous_photo(message: Message):
         await db.commit()
 
 # ----------------------------------------------------
-# Ответ менеджера на сообщение администратора в ЛС
-# ----------------------------------------------------
-
-@dp.message(F.chat.type == "private", F.reply_to_message)
-async def user_reply_in_pm(message: Message):
-    user_id = message.from_user.id
-    group_id, _, is_approved = await get_user_data(user_id)
-
-    if not group_id or not is_approved:
-        return
-
-    if message.text and message.text.startswith("/"):
-        return
-
-    replied_user_msg_id = message.reply_to_message.message_id
-
-    async with aiosqlite.connect("anonymous.db") as db:
-        async with db.execute(
-            "SELECT id, thread_id, telegram_message_id FROM anonymous_messages WHERE user_message_id = ?",
-            (replied_user_msg_id,)
-        ) as cursor:
-            result = await cursor.fetchone()
-
-    if not result:
-        return
-
-    anonymous_id, thread_id, group_msg_id = result
-    user_mention = get_user_mention(message.from_user)
-
-    try:
-        if message.photo:
-            raw_caption = message.caption or ""
-            caption_text = f"🥷 Аноним #{anonymous_id}"
-            if raw_caption:
-                caption_text += f"\n\n{html.escape(raw_caption)}"
-            caption_text += f"\n\n👤 {user_mention}"
-
-            await bot.send_photo(
-                chat_id=group_id,
-                message_thread_id=thread_id,
-                photo=message.photo[-1].file_id,
-                caption=caption_text,
-                reply_to_message_id=group_msg_id,
-                parse_mode="HTML"
-            )
-        elif message.text:
-            text_to_send = f"🥷 Аноним #{anonymous_id}\n\n{html.escape(message.text)}\n\n👤 {user_mention}"
-            await bot.send_message(
-                chat_id=group_id,
-                message_thread_id=thread_id,
-                text=text_to_send,
-                reply_to_message_id=group_msg_id,
-                parse_mode="HTML"
-            )
-    except TelegramAPIError as e:
-        await message.answer(f"❌ Ошибка отправки в группу: {e}")
-
-# ----------------------------------------------------
-# Ответ администратора из группы в ЛС менеджеру
+# Пересылка ответа администратора из группы менеджеру в ЛС
 # ----------------------------------------------------
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}), F.reply_to_message)

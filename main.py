@@ -12,12 +12,14 @@ from aiogram.types import (
     ReactionTypeEmoji,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
     CallbackQuery
 )
 from aiogram.exceptions import TelegramAPIError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SUPER_ADMIN_ID = 7710764694  # ⚠️ Твой личный Telegram ID
+SUPER_ADMIN_ID = 123456789  # ⚠️ Укажи здесь свой Telegram ID
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -40,10 +42,6 @@ WELCOME_TEXT = (
 # -----------------------
 # Состояния FSM
 # -----------------------
-
-class AuthState(StatesGroup):
-    choosing_thread = State()      # Выбор ветки кнопкой
-    waiting_for_message = State()  # Отправка текста/фото
 
 class AdminState(StatesGroup):
     waiting_for_group_id = State()
@@ -77,6 +75,7 @@ async def init_db():
             username TEXT,
             first_name TEXT,
             group_id INTEGER,
+            selected_thread_id INTEGER,
             is_approved INTEGER DEFAULT 0
         )
         """)
@@ -98,6 +97,10 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN group_id INTEGER")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN selected_thread_id INTEGER")
+        except Exception:
+            pass
 
         await db.commit()
 
@@ -106,16 +109,19 @@ async def init_db():
 # -----------------------
 
 def get_user_mention(user) -> str:
-    if user.username:
-        return f"@{html.escape(user.username)}"
-    safe_name = html.escape(user.first_name or "Пользователь")
+    """Создает кликабельное упоминание (с пингом/уведомлением)"""
+    username_text = f"@{user.username}" if user.username else (user.first_name or "Пользователь")
+    safe_name = html.escape(username_text)
     return f'<a href="tg://user?id={user.id}">{safe_name}</a>'
 
-async def get_user_group_id(user_id: int) -> int | None:
+async def get_user_data(user_id: int):
+    """Возвращает (group_id, selected_thread_id, is_approved)"""
     async with aiosqlite.connect("anonymous.db") as db:
-        async with db.execute("SELECT group_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
+        async with db.execute("SELECT group_id, selected_thread_id, is_approved FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
-            return row[0] if row and row[0] else None
+            if row:
+                return row[0], row[1], bool(row[2] == 1)
+            return None, None, False
 
 async def bind_user_to_group(user_id: int, group_id: int, username: str = None, first_name: str = None, approved: bool = False):
     async with aiosqlite.connect("anonymous.db") as db:
@@ -127,17 +133,17 @@ async def bind_user_to_group(user_id: int, group_id: int, username: str = None, 
                 group_id = excluded.group_id,
                 username = excluded.username,
                 first_name = excluded.first_name,
-                is_approved = excluded.is_approved
+                is_approved = CASE WHEN excluded.is_approved = 1 THEN 1 ELSE users.is_approved END
             """,
             (user_id, username, first_name, group_id, 1 if approved else 0)
         )
         await db.commit()
 
-async def is_user_approved(user_id: int) -> bool:
+async def update_user_selected_thread(user_id: int, thread_id: int):
+    """Сохраняет выбранную ветку прямо в профиль пользователя в БД"""
     async with aiosqlite.connect("anonymous.db") as db:
-        async with db.execute("SELECT is_approved FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            return bool(row and row[0] == 1)
+        await db.execute("UPDATE users SET selected_thread_id = ? WHERE user_id = ?", (thread_id, user_id))
+        await db.commit()
 
 async def set_user_approval(user_id: int, approved: bool):
     async with aiosqlite.connect("anonymous.db") as db:
@@ -157,19 +163,24 @@ async def is_group_admin(chat_id: int, user_id: int) -> bool:
     except Exception:
         return False
 
-async def get_threads_keyboard(group_id: int) -> InlineKeyboardMarkup | None:
+# -----------------------
+# Функция генерации ПОСТОЯННОЙ Reply-клавиатуры
+# -----------------------
+
+async def get_reply_threads_keyboard(group_id: int) -> ReplyKeyboardMarkup | None:
     async with aiosqlite.connect("anonymous.db") as db:
-        async with db.execute("SELECT thread_name, thread_id FROM group_threads WHERE group_id = ?", (group_id,)) as cursor:
+        async with db.execute("SELECT thread_name FROM group_threads WHERE group_id = ?", (group_id,)) as cursor:
             rows = await cursor.fetchall()
             
     if not rows:
         return None
 
+    # Делаем кнопки внизу чата
     keyboard = []
-    for name, t_id in rows:
-        keyboard.append([InlineKeyboardButton(text=name, callback_data=f"sel_thread_{t_id}")])
+    for row in rows:
+        keyboard.append([KeyboardButton(text=row[0])])
     
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 # -----------------------
 # Команда /start
@@ -189,17 +200,18 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
             await bind_user_to_group(user.id, target_group_id, user.username, user.first_name, approved=True)
             await state.clear()
             
-            kb = await get_threads_keyboard(target_group_id)
+            kb = await get_reply_threads_keyboard(target_group_id)
+            welcome_msg = "✅ <b>Доступ получен!</b>\n\n" + WELCOME_TEXT
             if kb:
-                await state.set_state(AuthState.choosing_thread)
-                await message.answer("✅ <b>Доступ получен!</b>\n\n📂 Выберите ветку для отправки сообщений:", reply_markup=kb, parse_mode="HTML")
+                welcome_msg += "\n\n👇 Выберите ветку для отправки на клавиатуре ниже:"
+                await message.answer(welcome_msg, reply_markup=kb, parse_mode="HTML")
             else:
-                await message.answer("✅ <b>Доступ получен!</b>\n\n" + WELCOME_TEXT, parse_mode="HTML")
+                await message.answer(welcome_msg, parse_mode="HTML")
             return
         except ValueError:
             pass
 
-    group_id = await get_user_group_id(user.id)
+    group_id, _, is_approved = await get_user_data(user.id)
     if not group_id:
         await message.answer(
             "⚠️ <b>Вы не привязаны ни к одной группе!</b>\n\n"
@@ -208,14 +220,13 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
         )
         return
 
-    if not await is_user_approved(user.id):
+    if not is_approved:
         await message.answer("⏳ <b>Ваш запрос находится на рассмотрении.</b>", parse_mode="HTML")
         return
 
-    kb = await get_threads_keyboard(group_id)
+    kb = await get_reply_threads_keyboard(group_id)
     if kb:
-        await state.set_state(AuthState.choosing_thread)
-        await message.answer("📂 Выберите ветку для отправки сообщений:", reply_markup=kb, parse_mode="HTML")
+        await message.answer("📂 Переключайтесь между ветками с помощью постоянных кнопок ниже:", reply_markup=kb)
     else:
         await message.answer(WELCOME_TEXT)
 
@@ -226,7 +237,7 @@ async def start_handler(message: Message, command: CommandObject, state: FSMCont
 @dp.message(Command("addthread"), F.chat.type == "private")
 async def add_thread_command(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    group_id = await get_user_group_id(user_id)
+    group_id, _, _ = await get_user_data(user_id)
 
     if not group_id:
         await message.answer("⚠️ Сначала привяжите группу через /admin.")
@@ -256,7 +267,7 @@ async def process_thread_id(message: Message, state: FSMContext):
     data = await state.get_data()
     thread_name = data.get("thread_name")
     user_id = message.from_user.id
-    group_id = await get_user_group_id(user_id)
+    group_id, _, _ = await get_user_data(user_id)
 
     async with aiosqlite.connect("anonymous.db") as db:
         await db.execute(
@@ -266,25 +277,12 @@ async def process_thread_id(message: Message, state: FSMContext):
         await db.commit()
 
     await state.clear()
-    await message.answer(f"✅ Кнопка «{thread_name}» создана и привязана к ветке `{thread_id}`!", parse_mode="HTML")
-
-# -----------------------
-# Выбор ветки через инлайн-кнопку
-# -----------------------
-
-@dp.callback_query(F.data.startswith("sel_thread_"))
-async def select_thread_callback(callback: CallbackQuery, state: FSMContext):
-    thread_id = int(callback.data.replace("sel_thread_", ""))
-    
-    await state.update_data(selected_thread_id=thread_id)
-    await state.set_state(AuthState.waiting_for_message)
-    
-    await callback.message.edit_text(
-        "✅ <b>Ветка выбрана!</b>\n\n"
-        "💬 Теперь отправьте ваше сообщение или фото, и оно автоматически улетит в выбранную тему.",
+    kb = await get_reply_threads_keyboard(group_id)
+    await message.answer(
+        f"✅ Кнопка «<b>{thread_name}</b>» создана и привязана к ветке `{thread_id}`!",
+        reply_markup=kb,
         parse_mode="HTML"
     )
-    await callback.answer()
 
 # -----------------------
 # Команда /admin
@@ -365,7 +363,7 @@ async def approve_group_callback(callback: CallbackQuery):
             text=(
                 "🎉 <b>Заявка одобрена!</b>\n\n"
                 f"🔗 <b>Инвайт-ссылка для сотрудников:</b>\n<code>{invite_link}</code>\n\n"
-                "⚙️ Чтобы добавить кнопки для веток, введите команду /addthread"
+                "⚙️ Чтобы добавить постоянные кнопки веток, введите команду /addthread"
             ),
             parse_mode="HTML"
         )
@@ -382,31 +380,55 @@ async def reject_group_callback(callback: CallbackQuery):
         pass
 
 # ----------------------------------------------------
+# Перехват клика по постоянным кнопкам веток
+# ----------------------------------------------------
+
+@dp.message(F.chat.type == "private", F.text)
+async def check_thread_switch(message: Message):
+    user_id = message.from_user.id
+    group_id, selected_thread_id, is_approved = await get_user_data(user_id)
+
+    if not group_id or not is_approved:
+        return
+
+    # Проверяем, совпадает ли текст сообщения с какой-либо кнопкой ветки
+    async with aiosqlite.connect("anonymous.db") as db:
+        async with db.execute(
+            "SELECT thread_id, thread_name FROM group_threads WHERE group_id = ? AND thread_name = ?",
+            (group_id, message.text)
+        ) as cursor:
+            thread_row = await cursor.fetchone()
+
+    if thread_row:
+        new_thread_id, thread_name = thread_row
+        await update_user_selected_thread(user_id, new_thread_id)
+        await message.answer(f"📌 **Вы переключились на ветку:** {html.escape(thread_name)}\nТеперь все отправляемые сообщения улетают туда.", parse_mode="HTML")
+        return
+
+    # Если это обычный текст — отправляем в выбранную ветку
+    await anonymous_message(message)
+
+# ----------------------------------------------------
 # Отправка ТЕКСТА в выбранную ветку
 # ----------------------------------------------------
 
-@dp.message(AuthState.waiting_for_message, F.chat.type == "private", F.text)
-async def anonymous_message(message: Message, state: FSMContext):
+async def anonymous_message(message: Message):
     user_id = message.from_user.id
-    group_id = await get_user_group_id(user_id)
+    group_id, thread_id, is_approved = await get_user_data(user_id)
 
-    if not group_id or not await is_user_approved(user_id):
+    if not group_id or not is_approved:
         await message.answer("⚠️ Нет доступа или группа не привязана.")
         return
 
     if message.text.startswith("/"):
         return
 
-    data = await state.get_data()
-    thread_id = data.get("selected_thread_id")
-
     if not thread_id:
-        kb = await get_threads_keyboard(group_id)
+        kb = await get_reply_threads_keyboard(group_id)
         if kb:
-            await state.set_state(AuthState.choosing_thread)
-            await message.answer("📂 Сначала выберите ветку с помощью кнопок:", reply_markup=kb)
+            await message.answer("📂 Пожалуйста, выберите ветку на клавиатуре ниже:", reply_markup=kb)
         else:
-            await message.answer("⚠️ В этой группе еще не настроены ветки для отправки.")
+            await message.answer("⚠️ В вашей группе ещё не настроены ветки для отправки.")
         return
 
     user = message.from_user
@@ -423,6 +445,7 @@ async def anonymous_message(message: Message, state: FSMContext):
         await db.commit()
         anonymous_id = cursor.lastrowid
 
+        # Формируем текст с ПИНГОМ/УВЕДОМЛЕНИЕМ через get_user_mention()
         text_to_send = f"🥷 Аноним #{anonymous_id}\n\n{html.escape(message.text)}\n\n👤 {user_mention}"
 
         sent_message = await bot.send_message(
@@ -438,31 +461,25 @@ async def anonymous_message(message: Message, state: FSMContext):
         )
         await db.commit()
 
-    await message.answer("✅ Сообщение отправлено в выбранную ветку!")
-
 # ----------------------------------------------------
 # Отправка ФОТОГРАФИЙ в выбранную ветку
 # ----------------------------------------------------
 
-@dp.message(AuthState.waiting_for_message, F.chat.type == "private", F.photo)
-async def anonymous_photo(message: Message, state: FSMContext):
+@dp.message(F.chat.type == "private", F.photo)
+async def anonymous_photo(message: Message):
     user_id = message.from_user.id
-    group_id = await get_user_group_id(user_id)
+    group_id, thread_id, is_approved = await get_user_data(user_id)
 
-    if not group_id or not await is_user_approved(user_id):
+    if not group_id or not is_approved:
         await message.answer("⚠️ Нет доступа или группа не привязана.")
         return
 
-    data = await state.get_data()
-    thread_id = data.get("selected_thread_id")
-
     if not thread_id:
-        kb = await get_threads_keyboard(group_id)
+        kb = await get_reply_threads_keyboard(group_id)
         if kb:
-            await state.set_state(AuthState.choosing_thread)
-            await message.answer("📂 Сначала выберите ветку с помощью кнопок:", reply_markup=kb)
+            await message.answer("📂 Пожалуйста, выберите ветку на клавиатуре ниже:", reply_markup=kb)
         else:
-            await message.answer("⚠️ В этой группе еще не настроены ветки для отправки.")
+            await message.answer("⚠️ В вашей группе ещё не настроены ветки для отправки.")
         return
 
     user = message.from_user
@@ -499,18 +516,16 @@ async def anonymous_photo(message: Message, state: FSMContext):
         )
         await db.commit()
 
-    await message.answer("✅ Фотография отправлена в выбранную ветку!")
-
 # ----------------------------------------------------
 # Ответ менеджера на сообщение администратора в ЛС
 # ----------------------------------------------------
 
 @dp.message(F.chat.type == "private", F.reply_to_message)
-async def user_reply_in_pm(message: Message, state: FSMContext):
+async def user_reply_in_pm(message: Message):
     user_id = message.from_user.id
-    group_id = await get_user_group_id(user_id)
+    group_id, _, is_approved = await get_user_data(user_id)
 
-    if not group_id or not await is_user_approved(user_id):
+    if not group_id or not is_approved:
         return
 
     if message.text and message.text.startswith("/"):
